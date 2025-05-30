@@ -488,42 +488,6 @@ fn process_event_converter<T: Serialize>(
     Ok(event)
 }
 
-// /// Convert an Annotated into an Event
-// /// If the Event represents an Error, then return an axum::Error
-// /// The [`monitor_for_disconnects`] method will handle the error, emit to the sse stream
-// /// then stop the generation of completions.
-// impl<T: Serialize> TryFrom<EventConverter<T>> for Event {
-//     type Error = axum::Error;
-
-//     fn try_from(annotated: EventConverter<T>) -> Result<Self, Self::Error> {
-//         let annotated = annotated.0;
-
-//         let mut event = Event::default();
-
-//         if let Some(data) = annotated.data {
-//             event = event.json_data(data)?;
-//         }
-
-//         if let Some(msg) = annotated.event {
-//             if msg == "error" {
-//                 let msgs = annotated
-//                     .comment
-//                     .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-//                 return Err(axum::Error::new(msgs.join(" -- ")));
-//             }
-//             event = event.event(msg);
-//         }
-
-//         if let Some(comments) = annotated.comment {
-//             for comment in comments {
-//                 event = event.comment(comment);
-//             }
-//         }
-
-//         Ok(event)
-//     }
-// }
-
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
 /// If not path is provided, the default path is `/v1/completions`
 pub fn completions_router(

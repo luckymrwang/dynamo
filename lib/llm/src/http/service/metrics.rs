@@ -316,7 +316,8 @@ impl InflightGuard {
 
     pub(crate) fn observe_response(&mut self, isl: usize, num_tokens: usize) {
         if self.first_token {
-            // NOTE: We don't consider the case with multiple tokens in the first response.
+            // NOTE: when there are multiple tokens in the first response, 
+            // we use the full response time as TTFT and ignore the ITL
             self.first_token = false;
 
             // Publish TTFT
@@ -327,6 +328,7 @@ impl InflightGuard {
                 .observe(ttft);
 
             // Publish ISL
+            // TODO: publish ITL as soon as the tokenization process completes
             self.metrics
                 .input_sequence_length
                 .with_label_values(&[&self.model])
