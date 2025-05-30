@@ -25,6 +25,10 @@ pub struct Metrics {
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
     request_duration: HistogramVec,
+    input_sequence_length: HistogramVec,
+    output_sequence_length: HistogramVec,
+    time_to_first_token: HistogramVec,
+    inter_token_latency: HistogramVec,
 }
 
 /// RAII object for inflight gauge and request counters
@@ -80,6 +84,10 @@ impl Metrics {
     /// - `{prefix}_http_service_requests_total` - IntCounterVec for the total number of requests processed
     /// - `{prefix}_http_service_inflight_requests` - IntGaugeVec for the number of inflight requests
     /// - `{prefix}_http_service_request_duration_seconds` - HistogramVec for the duration of requests
+    /// - `{prefix}_http_service_input_sequence_length` - HistogramVec for input sequence length in tokens
+    /// - `{prefix}_http_service_output_sequence_length` - HistogramVec for output sequence length in tokens
+    /// - `{prefix}_http_service_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
+    /// - `{prefix}_http_service_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
     pub fn new(prefix: &str) -> Self {
         let request_counter = IntCounterVec::new(
             Opts::new(
@@ -111,10 +119,54 @@ impl Metrics {
         )
         .unwrap();
 
+        let input_sequence_length = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_input_sequence_length", prefix),
+                "Input sequence length in tokens",
+            )
+            .buckets(vec![50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 64000.0, 128000.0]),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
+        let output_sequence_length = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_output_sequence_length", prefix),
+                "Output sequence length in tokens",
+            )
+            .buckets(vec![50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0]),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
+        let time_to_first_token = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_time_to_first_token_seconds", prefix),
+                "Time to first token in seconds",
+            )
+            .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 240.0, 480.0]),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
+        let inter_token_latency = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_inter_token_latency_seconds", prefix),
+                "Inter-token latency in seconds",
+            )
+            .buckets(vec![0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0]),
+            &["model", "endpoint"],
+        )
+        .unwrap();
+
         Metrics {
             request_counter,
             inflight_gauge,
             request_duration,
+            input_sequence_length,
+            output_sequence_length,
+            time_to_first_token,
+            inter_token_latency,
         }
     }
 
@@ -179,6 +231,10 @@ impl Metrics {
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
+        registry.register(Box::new(self.input_sequence_length.clone()))?;
+        registry.register(Box::new(self.output_sequence_length.clone()))?;
+        registry.register(Box::new(self.time_to_first_token.clone()))?;
+        registry.register(Box::new(self.inter_token_latency.clone()))?;
         Ok(())
     }
 

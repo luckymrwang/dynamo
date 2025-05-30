@@ -110,6 +110,10 @@ impl DeltaGenerator {
         self.usage.prompt_tokens = isl;
     }
 
+    pub fn get_isl(&self) -> Option<u32> {
+        Some(self.usage.prompt_tokens)
+    }
+
     /// Creates a choice within a chat completion response.
     ///
     /// # Arguments

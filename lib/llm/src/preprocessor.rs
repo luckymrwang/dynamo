@@ -193,6 +193,7 @@ impl OpenAIPreprocessor {
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
             context: Arc<dyn AsyncEngineContext>,
             cancelled: bool,
+            cumulative_output_tokens: usize,
         }
 
         let state = State {
@@ -200,6 +201,7 @@ impl OpenAIPreprocessor {
             response_generator: generator,
             context: context.clone(),
             cancelled: false,
+            cumulative_output_tokens: 0,
         };
 
         // transform the common response stream into a chat response stream
@@ -220,6 +222,19 @@ impl OpenAIPreprocessor {
                         response
                     );
 
+                    let (chunk_tokens, isl) = if let Some(ref backend_output) = response.data {
+                        let chunk_tokens = backend_output.token_ids.len();
+                        inner.cumulative_output_tokens += chunk_tokens;
+                        
+                        let isl = inner.response_generator.get_isl().unwrap_or(0) as usize;
+                        
+                        (chunk_tokens, isl)
+                    } else {
+                        (0, 0)
+                    };
+
+                    let current_osl = inner.cumulative_output_tokens;
+
                     let response = response.map_data(|data| {
                         inner
                             .response_generator
@@ -235,6 +250,18 @@ impl OpenAIPreprocessor {
                             })
                             .map_err(|e| e.to_string())
                     });
+
+                    let response = match response {
+                        Ok(mut annotated_resp) => {
+                            let mut comments = annotated_resp.comment.unwrap_or_default();
+                            comments.push(format!("chunk_tokens: {}", chunk_tokens));
+                            comments.push(format!("input_tokens: {}", isl));
+                            comments.push(format!("output_tokens: {}", current_osl));
+                            annotated_resp.comment = Some(comments);
+                            Ok(annotated_resp)
+                        }
+                        Err(e) => Err(e),
+                    };
 
                     tracing::trace!(
                         request_id = inner.context.id(),
