@@ -3,7 +3,10 @@
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{Encoder, HistogramOpts, HistogramVec, IntCounterVec, IntGaugeVec, Opts};
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 pub use prometheus::Registry;
 
@@ -42,6 +45,9 @@ pub struct InflightGuard {
     request_type: RequestType,
     status: Status,
     timer: Instant,
+    first_token: bool,
+    last_response: Option<Duration>,
+    osl: usize,
 }
 
 /// Requests will be logged by the type of endpoint hit
@@ -124,8 +130,11 @@ impl Metrics {
                 format!("{}_http_service_input_sequence_length", prefix),
                 "Input sequence length in tokens",
             )
-            .buckets(vec![50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 64000.0, 128000.0]),
-            &["model", "endpoint"],
+            .buckets(vec![
+                50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 64000.0,
+                128000.0,
+            ]),
+            &["model"],
         )
         .unwrap();
 
@@ -134,8 +143,10 @@ impl Metrics {
                 format!("{}_http_service_output_sequence_length", prefix),
                 "Output sequence length in tokens",
             )
-            .buckets(vec![50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0]),
-            &["model", "endpoint"],
+            .buckets(vec![
+                50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
+            ]),
+            &["model"],
         )
         .unwrap();
 
@@ -144,8 +155,11 @@ impl Metrics {
                 format!("{}_http_service_time_to_first_token_seconds", prefix),
                 "Time to first token in seconds",
             )
-            .buckets(vec![0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 240.0, 480.0]),
-            &["model", "endpoint"],
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0,
+                120.0, 240.0, 480.0,
+            ]),
+            &["model"],
         )
         .unwrap();
 
@@ -154,8 +168,10 @@ impl Metrics {
                 format!("{}_http_service_inter_token_latency_seconds", prefix),
                 "Inter-token latency in seconds",
             )
-            .buckets(vec![0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0]),
-            &["model", "endpoint"],
+            .buckets(vec![
+                0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+            ]),
+            &["model"],
         )
         .unwrap();
 
@@ -280,11 +296,57 @@ impl InflightGuard {
             request_type,
             status: Status::Error,
             timer,
+            first_token: true,
+            last_response: None,
+            osl: 0,
         }
     }
 
     pub(crate) fn mark_ok(&mut self) {
         self.status = Status::Success;
+        self.metrics
+            .output_sequence_length
+            .with_label_values(&[&self.model])
+            .observe(self.osl as f64);
+    }
+
+    pub(crate) fn observe_current_osl(&mut self, osl: usize) {
+        self.osl = osl;
+    }
+
+    pub(crate) fn observe_response(&mut self, isl: usize, num_tokens: usize) {
+        if self.first_token {
+            // NOTE: We don't consider the case with multiple tokens in the first response.
+            self.first_token = false;
+
+            // Publish TTFT
+            let ttft = self.timer.elapsed().as_secs_f64();
+            self.metrics
+                .time_to_first_token
+                .with_label_values(&[&self.model])
+                .observe(ttft);
+
+            // Publish ISL
+            self.metrics
+                .input_sequence_length
+                .with_label_values(&[&self.model])
+                .observe(isl as f64);
+        }
+
+        let current_duration = self.timer.elapsed();
+
+        if let Some(last_response) = self.last_response {
+            let response_duration = current_duration - last_response;
+            let itl = response_duration.as_secs_f64() / num_tokens as f64;
+            for _ in 0..num_tokens {
+                self.metrics
+                    .inter_token_latency
+                    .with_label_values(&[&self.model])
+                    .observe(itl);
+            }
+        }
+
+        self.last_response = Some(current_duration);
     }
 }
 
