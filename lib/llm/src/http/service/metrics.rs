@@ -131,7 +131,7 @@ impl Metrics {
                 "Input sequence length in tokens",
             )
             .buckets(vec![
-                50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 64000.0,
+                0.0, 50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0, 64000.0,
                 128000.0,
             ]),
             &["model"],
@@ -144,7 +144,7 @@ impl Metrics {
                 "Output sequence length in tokens",
             )
             .buckets(vec![
-                50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
+                0.0, 50.0, 100.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0, 32000.0,
             ]),
             &["model"],
         )
@@ -156,8 +156,8 @@ impl Metrics {
                 "Time to first token in seconds",
             )
             .buckets(vec![
-                0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0,
-                120.0, 240.0, 480.0,
+                0.0, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
+                60.0, 120.0, 240.0, 480.0,
             ]),
             &["model"],
         )
@@ -169,7 +169,7 @@ impl Metrics {
                 "Inter-token latency in seconds",
             )
             .buckets(vec![
-                0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+                0.0, 0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
             ]),
             &["model"],
         )
@@ -316,7 +316,7 @@ impl InflightGuard {
 
     pub(crate) fn observe_response(&mut self, isl: usize, num_tokens: usize) {
         if self.first_token {
-            // NOTE: when there are multiple tokens in the first response, 
+            // NOTE: when there are multiple tokens in the first response,
             // we use the full response time as TTFT and ignore the ITL
             self.first_token = false;
 
