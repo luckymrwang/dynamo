@@ -64,6 +64,7 @@ pub enum Endpoint {
 }
 
 /// Metrics for the HTTP service
+#[derive(Debug)]
 pub enum RequestType {
     /// SingleIn / SingleOut
     Unary,
@@ -73,6 +74,7 @@ pub enum RequestType {
 }
 
 /// Status
+#[derive(Debug)]
 pub enum Status {
     Success,
     Error,
@@ -80,6 +82,7 @@ pub enum Status {
 
 impl Default for Metrics {
     fn default() -> Self {
+        // TODO: Rename to dynamo
         Self::new("nv_llm")
     }
 }
@@ -288,6 +291,8 @@ impl InflightGuard {
         // Increment the inflight gauge when the guard is created
         metrics.inc_inflight_gauge(&model);
 
+        tracing::info!("Inflight gauge: {}", metrics.get_inflight_count(&model));
+
         // Return the RAII Guard
         InflightGuard {
             metrics,
@@ -333,6 +338,13 @@ impl InflightGuard {
                 .input_sequence_length
                 .with_label_values(&[&self.model])
                 .observe(isl as f64);
+
+            tracing::info!(
+                "TTFT (secs): {}, ISL (tokens): {}, num_tokens: {}",
+                ttft,
+                isl,
+                num_tokens
+            );
         }
 
         let current_duration = self.timer.elapsed();
@@ -346,6 +358,13 @@ impl InflightGuard {
                     .with_label_values(&[&self.model])
                     .observe(itl);
             }
+
+            tracing::info!(
+                "ITL (secs): {}, response_duration (secs): {}, num_tokens: {}",
+                itl,
+                response_duration.as_secs_f64(),
+                num_tokens
+            );
         }
 
         self.last_response = Some(current_duration);
@@ -357,6 +376,11 @@ impl Drop for InflightGuard {
         // Decrement the gauge when the guard is dropped
         self.metrics.dec_inflight_gauge(&self.model);
 
+        tracing::info!(
+            "Inflight gauge: {}",
+            self.metrics.get_inflight_count(&self.model)
+        );
+
         // the frequency on incrementing the full request counter is relatively low
         // if we were incrementing the counter on every forward pass, we'd use static CounterVec or
         // discrete counter object without the more costly lookup required for the following calls
@@ -367,11 +391,30 @@ impl Drop for InflightGuard {
             &self.status,
         );
 
+        tracing::info!(
+            "Completed request counter for model: {}, endpoint: {}, request_type: {:?}, status: {:?}, count: {}",
+            &self.model,
+            &self.endpoint,
+            &self.request_type,
+            &self.status,
+            self.metrics.get_request_counter(
+                &self.model,
+                &self.endpoint,
+                &self.request_type,
+                &self.status,
+            )
+        );
+
         // Record the duration of the request
         self.metrics
             .request_duration
             .with_label_values(&[&self.model])
             .observe(self.timer.elapsed().as_secs_f64());
+
+        tracing::info!(
+            "Request duration: {} (secs)",
+            self.timer.elapsed().as_secs_f64(),
+        );
     }
 }
 
