@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import logging
 import sys
+import time
 import warnings
 from typing import Optional
 
@@ -89,6 +90,8 @@ class RequestHandler:
             sampling_params.max_tokens = max_tokens
 
         num_output_tokens_so_far = 0
+        last_yield_time = None
+        generation_start_time = time.time()
         # TODO: Disable streaming for context only requests when adding disagg support
         async for res in self.engine.llm.generate_async(
             inputs=inputs, sampling_params=sampling_params, streaming=True
@@ -114,7 +117,20 @@ class RequestHandler:
                 out["finish_reason"] = output.finish_reason
             if output.stop_reason:
                 out["stop_reason"] = output.stop_reason
+
+            # Track timing for first token and inter-token latency
+            current_time = time.time()
+            if last_yield_time is None:
+                # First token - measure time to first token
+                time_to_first_token = current_time - generation_start_time
+                logging.info(f"Time to first token: {time_to_first_token:.6f} seconds")
+            else:
+                # Subsequent tokens - measure inter-token latency
+                inter_token_latency = current_time - last_yield_time
+                logging.info(f"Inter-token latency: {inter_token_latency:.6f} seconds")
+
             yield out
+            last_yield_time = current_time
             num_output_tokens_so_far = next_total_toks
 
 
