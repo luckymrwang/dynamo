@@ -17,7 +17,7 @@ use std::{
     collections::HashSet,
     pin::Pin,
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -127,6 +127,19 @@ async fn completions(
 
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
+    let start_time = Instant::now();
+    let start_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    tracing::info!(
+        request_id = %request_id,
+        start_timestamp = %start_timestamp,
+        endpoint = "completions",
+        model = %request.inner.model,
+        "HTTP request started"
+    );
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -147,10 +160,22 @@ async fn completions(
     let model = &request.inner.model;
 
     // todo - error handling should be more robust
-    let engine = state
-        .manager()
-        .get_completions_engine(model)
-        .map_err(|_| ErrorResponse::model_not_found())?;
+    let engine = state.manager().get_completions_engine(model).map_err(|e| {
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::error!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            error = %e,
+            "HTTP request failed - model not found"
+        );
+        ErrorResponse::model_not_found()
+    })?;
 
     // this will increment the inflight gauge for the model
     let mut inflight =
@@ -163,10 +188,22 @@ async fn completions(
     let request = Context::with_id(request, request_id.clone());
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::error!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            error = %e,
+            "HTTP request failed - generate error"
+        );
+        ErrorResponse::from_anyhow(e, "Failed to generate completions")
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -176,7 +213,14 @@ async fn completions(
 
     if streaming {
         let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = monitor_for_disconnects(
+            stream.boxed(),
+            ctx,
+            inflight,
+            request_id.clone(),
+            start_time,
+        )
+        .await;
 
         let mut sse_stream = Sse::new(stream);
 
@@ -184,20 +228,58 @@ async fn completions(
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
+        // Log completion for streaming requests
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::info!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            streaming = true,
+            "HTTP request stream started"
+        );
+
         Ok(sse_stream.into_response())
     } else {
         let response = CompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
+                let elapsed = start_time.elapsed();
+                let end_timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+
                 tracing::error!(
-                    "Failed to fold completions stream for {}: {:?}",
-                    request_id,
-                    e
+                    request_id = %request_id,
+                    end_timestamp = %end_timestamp,
+                    duration_ms = %elapsed.as_millis(),
+                    error = %e,
+                    "HTTP request failed - failed to fold completions stream"
                 );
                 ErrorResponse::internal_server_error("Failed to fold completions stream")
             })?;
 
         inflight.mark_ok();
+
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::info!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            streaming = false,
+            "HTTP request completed successfully"
+        );
+
         Ok(Json(response).into_response())
     }
 }
@@ -207,7 +289,36 @@ async fn embeddings(
     State(_state): State<Arc<service_v2::State>>,
     Json(_request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    unimplemented!("embeddings are not supported yet");
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let start_time = Instant::now();
+    let start_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    tracing::info!(
+        request_id = %request_id,
+        start_timestamp = %start_timestamp,
+        endpoint = "embeddings",
+        "HTTP request started"
+    );
+
+    let elapsed = start_time.elapsed();
+    let end_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    tracing::error!(
+        request_id = %request_id,
+        end_timestamp = %end_timestamp,
+        duration_ms = %elapsed.as_millis(),
+        "HTTP request failed - embeddings are not supported yet"
+    );
+
+    Err(ErrorResponse::internal_server_error(
+        "embeddings are not supported yet",
+    ))
 }
 
 /// OpenAI Chat Completions Request Handler
@@ -238,10 +349,24 @@ async fn chat_completions(
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
-    tracing::trace!("Received chat completions request: {:?}", request.inner);
 
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
+    let start_time = Instant::now();
+    let start_timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    tracing::info!(
+        request_id = %request_id,
+        start_timestamp = %start_timestamp,
+        endpoint = "chat_completions",
+        model = %request.inner.model,
+        "HTTP request started"
+    );
+
+    tracing::trace!("Received chat completions request: {:?}", request.inner);
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -267,7 +392,22 @@ async fn chat_completions(
     let engine = state
         .manager()
         .get_chat_completions_engine(model)
-        .map_err(|_| ErrorResponse::model_not_found())?;
+        .map_err(|e| {
+            let elapsed = start_time.elapsed();
+            let end_timestamp = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis();
+
+            tracing::error!(
+                request_id = %request_id,
+                end_timestamp = %end_timestamp,
+                duration_ms = %elapsed.as_millis(),
+                error = %e,
+                "HTTP request failed - model not found"
+            );
+            ErrorResponse::model_not_found()
+        })?;
 
     // this will increment the inflight gauge for the model
     let mut inflight =
@@ -282,10 +422,22 @@ async fn chat_completions(
     tracing::trace!("Issuing generate call for chat completions");
 
     // issue the generate call on the engine
-    let stream = engine
-        .generate(request)
-        .await
-        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
+    let stream = engine.generate(request).await.map_err(|e| {
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::error!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            error = %e,
+            "HTTP request failed - generate error"
+        );
+        ErrorResponse::from_anyhow(e, "Failed to generate completions")
+    })?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
@@ -295,7 +447,14 @@ async fn chat_completions(
 
     if streaming {
         let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = monitor_for_disconnects(
+            stream.boxed(),
+            ctx,
+            inflight,
+            request_id.clone(),
+            start_time,
+        )
+        .await;
 
         let mut sse_stream = Sse::new(stream);
 
@@ -303,15 +462,38 @@ async fn chat_completions(
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
+        // Log completion for streaming requests
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::info!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            streaming = true,
+            "HTTP request stream started"
+        );
+
         Ok(sse_stream.into_response())
     } else {
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
+                let elapsed = start_time.elapsed();
+                let end_timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis();
+
                 tracing::error!(
-                    request_id,
-                    "Failed to fold chat completions stream for: {:?}",
-                    e
+                    request_id = %request_id,
+                    end_timestamp = %end_timestamp,
+                    duration_ms = %elapsed.as_millis(),
+                    error = %e,
+                    "HTTP request failed - failed to fold chat completions stream"
                 );
                 ErrorResponse::internal_server_error(&format!(
                     "Failed to fold chat completions stream: {}",
@@ -320,6 +502,21 @@ async fn chat_completions(
             })?;
 
         inflight.mark_ok();
+
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::info!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            streaming = false,
+            "HTTP request completed successfully"
+        );
+
         Ok(Json(response).into_response())
     }
 }
@@ -400,16 +597,28 @@ async fn monitor_for_disconnects(
     >,
     context: Arc<dyn AsyncEngineContext>,
     inflight: InflightGuard,
+    request_id: String,
+    start_time: Instant,
 ) -> ReceiverStream<Result<Event, axum::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
 
     tokio::spawn(async move {
         let mut inflight = inflight;
         let mut stream = stream;
+        let mut event_count = 0u64;
+
         while let Some(event) = stream.next().await {
+            event_count += 1;
             let event = match event {
                 Ok(event) => Ok(event),
-                Err(err) => Ok(Event::default().event("error").comment(err.to_string())),
+                Err(err) => {
+                    tracing::error!(
+                        request_id = %request_id,
+                        error = %err,
+                        "SSE stream error encountered"
+                    );
+                    Ok(Event::default().event("error").comment(err.to_string()))
+                }
             };
 
             if (tx.send(event).await).is_err() {
@@ -419,11 +628,21 @@ async fn monitor_for_disconnects(
             }
         }
 
-        // the stream completed successfully - mark as ok
-        // this will increment the request counter with an "success" status
-        if tx.send(Ok(Event::default().data("[DONE]"))).await.is_ok() {
-            inflight.mark_ok();
-        }
+        inflight.mark_ok();
+        let elapsed = start_time.elapsed();
+        let end_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+
+        tracing::info!(
+            request_id = %request_id,
+            end_timestamp = %end_timestamp,
+            duration_ms = %elapsed.as_millis(),
+            event_count = %event_count,
+            streaming = true,
+            "HTTP streaming request completed"
+        );
     });
 
     ReceiverStream::new(rx)

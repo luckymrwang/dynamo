@@ -1,10 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use super::metrics;
+use super::middleware;
 use super::Metrics;
 use super::RouteDoc;
 use crate::discovery::ModelManager;
@@ -80,6 +82,12 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
+
+    #[builder(default = "true")]
+    enable_request_logging: bool,
+
+    #[builder(default = "false")]
+    enable_trace_layer: bool,
 }
 
 impl HttpService {
@@ -115,10 +123,13 @@ impl HttpService {
         let router = self.router.clone();
         let observer = cancel_token.child_token();
 
-        axum::serve(listener, router)
-            .with_graceful_shutdown(observer.cancelled_owned())
-            .await
-            .inspect_err(|_| cancel_token.cancel())?;
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(observer.cancelled_owned())
+        .await
+        .inspect_err(|_| cancel_token.cancel())?;
 
         Ok(())
     }
@@ -174,6 +185,17 @@ impl HttpServiceConfigBuilder {
         for (route_docs, route) in routes.into_iter() {
             router = router.merge(route);
             all_docs.extend(route_docs);
+        }
+
+        // Add middleware layers if enabled
+        if config.enable_trace_layer {
+            router = router.layer(middleware::create_trace_layer());
+        }
+
+        if config.enable_request_logging {
+            router = router.layer(axum::middleware::from_fn(
+                middleware::request_logging_middleware,
+            ));
         }
 
         Ok(HttpService {
