@@ -39,7 +39,12 @@ DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
-logging.basicConfig(level=logging.DEBUG)
+# TODO: Unify logging with dynamo-run wrapper / rust logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S.%f",
+)
 
 
 class Config:
@@ -123,11 +128,11 @@ class RequestHandler:
             if last_yield_time is None:
                 # First token - measure time to first token
                 time_to_first_token = current_time - generation_start_time
-                logging.info(f"Time to first token: {time_to_first_token:.6f} seconds")
+                logging.info(f"Python TRTLLM TTFT: {time_to_first_token:.6f} seconds")
             else:
                 # Subsequent tokens - measure inter-token latency
                 inter_token_latency = current_time - last_yield_time
-                logging.info(f"Inter-token latency: {inter_token_latency:.6f} seconds")
+                logging.info(f"Python TRTLLM ITL: {inter_token_latency:.6f} seconds")
 
             yield out
             last_yield_time = current_time
