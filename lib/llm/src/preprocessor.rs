@@ -29,7 +29,8 @@ pub mod tools;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::atomic::{AtomicF64, AtomicU64, Ordering};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 use tracing;
 
 use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
@@ -122,6 +123,10 @@ impl OpenAIPreprocessor {
         &self,
         request: &R,
     ) -> Result<(BackendInput, HashMap<String, String>)> {
+        // Track total cumulative time across all requests
+        static TOTAL_TIME: AtomicF64 = AtomicF64::new(0.0);
+        static COUNT: AtomicU64 = AtomicU64::new(0);
+        let start = Instant::now();
         let mut annotations = HashMap::new();
         let mut builder = BackendInput::builder();
 
@@ -179,6 +184,16 @@ impl OpenAIPreprocessor {
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
 
+        let end = Instant::now();
+        let duration = end.duration_since(start).as_secs_f64();
+        TOTAL_TIME.fetch_add(duration, Ordering::Relaxed);
+        COUNT.fetch_add(1, Ordering::Relaxed);
+        tracing::info!("Preprocessing time (now): {:?} seconds", duration);
+        tracing::info!(
+            "Preprocessing time (cumulative): {:?} seconds, Count: {:?}",
+            TOTAL_TIME.load(Ordering::Relaxed),
+            COUNT.load(Ordering::Relaxed)
+        );
         Ok((builder.build()?, annotations))
     }
 
@@ -207,16 +222,20 @@ impl OpenAIPreprocessor {
         // transform the common response stream into a chat response stream
         let stream = stream::unfold(state, |mut inner| {
             async move {
+                // Track total cumulative time across all requests
+                static TOTAL_TIME: AtomicF64 = AtomicF64::new(0.0);
+                static COUNT: AtomicU64 = AtomicU64::new(0);
+                let start = Instant::now();
                 if let Some(response) = inner.response_stream.next().await {
                     if inner.cancelled {
-                        tracing::debug!(
+                        tracing::info!(
                             request_id = inner.context.id(),
                             "Cancellation issued last message; closing stream"
                         );
                         return None;
                     }
 
-                    tracing::trace!(
+                    tracing::info!(
                         request_id = inner.context.id(),
                         "Processing common response: {:?}",
                         response
@@ -255,7 +274,18 @@ impl OpenAIPreprocessor {
                     response.input_tokens = Some(isl);
                     response.output_tokens = Some(current_osl);
 
-                    tracing::trace!(
+                    let end = Instant::now();
+                    let duration = end.duration_since(start).as_secs_f64();
+                    TOTAL_TIME.fetch_add(duration, Ordering::Relaxed);
+                    COUNT.fetch_add(1, Ordering::Relaxed);
+                    tracing::info!("Postprocessing time (now): {:?} seconds", duration);
+                    tracing::info!(
+                        "Postprocessing time (cumulative): {:?} seconds, Count: {:?}",
+                        TOTAL_TIME.load(Ordering::Relaxed),
+                        COUNT.load(Ordering::Relaxed)
+                    );
+
+                    tracing::info!(
                         request_id = inner.context.id(),
                         "OpenAI NvCreateChatCompletionStreamResponse: {:?}",
                         response

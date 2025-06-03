@@ -72,6 +72,9 @@ class RequestHandler:
         self.default_sampling_params = default_sampling_params
         self.publishers = publishers
         self.first_generation = True
+        # Debug
+        self.itl_total_secs = 0.0
+        self.itl_count = 0
 
     async def generate(self, request):
         # Check if there is an error in the publishers error queue
@@ -132,7 +135,17 @@ class RequestHandler:
             else:
                 # Subsequent tokens - measure inter-token latency
                 inter_token_latency = current_time - last_yield_time
-                logging.info(f"Python TRTLLM ITL: {inter_token_latency:.6f} seconds")
+                self.itl_total_secs += inter_token_latency
+                self.itl_count += 1
+                logging.info(
+                    f"Python TRTLLM ITL (now): {inter_token_latency:.6f} seconds"
+                )
+                logging.info(
+                    f"Python TRTLLM ITL (avg): {self.itl_total_secs / self.itl_count:.6f} seconds"
+                )
+                logging.info(
+                    f"Python TRTLLM ITL (cumulative): {self.itl_total_secs:.6f} seconds, COUNT: {self.itl_count}"
+                )
 
             yield out
             last_yield_time = current_time
