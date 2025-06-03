@@ -159,7 +159,13 @@ where
         // Clone the PyObject to move into the thread
 
         // Create a channel to communicate between the Python thread and the Rust async context
-        let (tx, rx) = mpsc::channel::<Annotated<Resp>>(128);
+        // Use env var to set the capacity
+        let capacity = std::env::var("DYN_PYTHON_ENGINE_CHANNEL_CAPACITY")
+            .unwrap_or_else(|_| "128".to_string())
+            .parse::<usize>()
+            .unwrap_or(128);
+        tracing::info!("setting python engine channel capacity to {}", capacity);
+        let (tx, rx) = mpsc::channel::<Annotated<Resp>>(capacity);
 
         let generator = self.generator.clone();
         let event_loop = self.event_loop.clone();
