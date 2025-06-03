@@ -29,7 +29,7 @@ pub mod tools;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
-use std::sync::atomic::{AtomicF64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tracing;
 
@@ -124,7 +124,7 @@ impl OpenAIPreprocessor {
         request: &R,
     ) -> Result<(BackendInput, HashMap<String, String>)> {
         // Track total cumulative time across all requests
-        static TOTAL_TIME: AtomicF64 = AtomicF64::new(0.0);
+        static TOTAL_TIME: AtomicU64 = AtomicU64::new(0);
         static COUNT: AtomicU64 = AtomicU64::new(0);
         let start = Instant::now();
         let mut annotations = HashMap::new();
@@ -186,12 +186,14 @@ impl OpenAIPreprocessor {
 
         let end = Instant::now();
         let duration = end.duration_since(start).as_secs_f64();
-        TOTAL_TIME.fetch_add(duration, Ordering::Relaxed);
+        let duration_us = duration * 1_000_000.0;
+        let duration_us_int = duration_us as u64;
+        TOTAL_TIME.fetch_add(duration_us_int, Ordering::Relaxed);
         COUNT.fetch_add(1, Ordering::Relaxed);
         tracing::info!("Preprocessing time (now): {:?} seconds", duration);
         tracing::info!(
             "Preprocessing time (cumulative): {:?} seconds, Count: {:?}",
-            TOTAL_TIME.load(Ordering::Relaxed),
+            TOTAL_TIME.load(Ordering::Relaxed) as f64 / 1_000_000.0,
             COUNT.load(Ordering::Relaxed)
         );
         Ok((builder.build()?, annotations))
@@ -223,7 +225,7 @@ impl OpenAIPreprocessor {
         let stream = stream::unfold(state, |mut inner| {
             async move {
                 // Track total cumulative time across all requests
-                static TOTAL_TIME: AtomicF64 = AtomicF64::new(0.0);
+                static TOTAL_TIME: AtomicU64 = AtomicU64::new(0);
                 static COUNT: AtomicU64 = AtomicU64::new(0);
                 let start = Instant::now();
                 if let Some(response) = inner.response_stream.next().await {
@@ -276,12 +278,14 @@ impl OpenAIPreprocessor {
 
                     let end = Instant::now();
                     let duration = end.duration_since(start).as_secs_f64();
-                    TOTAL_TIME.fetch_add(duration, Ordering::Relaxed);
+                    let duration_us = duration * 1_000_000.0;
+                    let duration_us_int = duration_us as u64;
+                    TOTAL_TIME.fetch_add(duration_us_int, Ordering::Relaxed);
                     COUNT.fetch_add(1, Ordering::Relaxed);
                     tracing::info!("Postprocessing time (now): {:?} seconds", duration);
                     tracing::info!(
                         "Postprocessing time (cumulative): {:?} seconds, Count: {:?}",
-                        TOTAL_TIME.load(Ordering::Relaxed),
+                        TOTAL_TIME.load(Ordering::Relaxed) as f64 / 1_000_000.0,
                         COUNT.load(Ordering::Relaxed)
                     );
 
