@@ -91,6 +91,7 @@ jobs:
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
 
+  # The block manager requires NIXL to be installed, so we run this part in docker in a separate job.
   block-manager-rust:
     runs-on:
       group: Fastchecker
