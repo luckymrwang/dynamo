@@ -102,7 +102,7 @@ for concurrency in "${concurrency_array[@]}"; do
     --extra-inputs max_tokens:"${osl}" \
     --extra-inputs min_tokens:"${osl}" \
     --extra-inputs ignore_eos:true \
-    --extra-inputs '{"nvext":{"ignore_eos":true}}' \
+    --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
     --concurrency "${concurrency}" \
     --request-count $(($concurrency * 10)) \
     --warmup-request-count $(($concurrency * 2)) \
