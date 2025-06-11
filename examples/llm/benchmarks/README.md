@@ -216,11 +216,18 @@ With the Dynamo repository and the benchmarking image available, perform the fol
 
 ## Collecting Performance Numbers
 
-Run the benchmarking script
-
+Run the benchmarking script and specify the model, input sequence length, output sequence length, and concurrency levels to target for benchmarking:
 ```bash
-bash -x /workspace/benchmarks/llm/perf.sh
+bash -x /workspace/benchmarks/llm/perf.sh \
+  --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+  --isl 3000 \
+  --osl 150 \
+  --url http://localhost:8000 \
+  --concurrency 1,2,4,8,16,32,64,128,256
 ```
+Note:
+* You can also run `bash -x /workspace/benchmarks/llm/perf.sh` without any parameters, in which case the script will use the default values shown above.
+* The `--concurrency` option accepts either a single value (e.g., 64) or a comma-separated list (e.g., 1,2,4,8) to specify multiple concurrency levels for benchmarking.
 
 > [!Tip]
 > See [GenAI-Perf tutorial](https://github.com/triton-inference-server/perf_analyzer/blob/main/genai-perf/docs/tutorial.md)
