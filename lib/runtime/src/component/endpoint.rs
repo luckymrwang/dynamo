@@ -89,7 +89,7 @@ impl EndpointConfigBuilder {
         tracing::debug!(
             "Starting endpoint: {}",
             endpoint.etcd_path_with_lease_id(lease_id)
-
+        );
 
         let service_name = endpoint.component.service_name();
 
@@ -167,7 +167,7 @@ impl EndpointConfigBuilder {
             Some(()) => {
                 // no HTTP started, start it
                 let http_management_info = HttpManagementInfo {
-                    drt: Arc::new(endpoint.component.drt.clone()),
+                    drt: endpoint.component.drt.clone(),
                 };
                 
                 // Determine port to use
