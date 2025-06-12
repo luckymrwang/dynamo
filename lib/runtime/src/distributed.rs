@@ -22,7 +22,9 @@ use crate::{
     ErrorContext,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, Weak, OK, HttpManagementServiceInfo};
+use super::{
+    error, Arc, DistributedRuntime, HttpManagementServiceInfo, OnceCell, Result, Runtime, Weak, OK,
+};
 
 use derive_getters::Dissolve;
 use figment::error;
@@ -177,7 +179,7 @@ impl DistributedRuntime {
 
         // We get to start the service, reserve the slot
         *service_guard = Some(HttpManagementServiceInfo {
-            task_handle: tokio::spawn(async {}) // Placeholder task
+            task_handle: tokio::spawn(async {}), // Placeholder task
         });
 
         tracing::info!("Reserved HTTP management service slot");
@@ -185,7 +187,10 @@ impl DistributedRuntime {
     }
 
     /// Complete the HTTP management service registration with the actual task handle
-    pub async fn complete_http_management_service_registration(&self, task_handle: tokio::task::JoinHandle<()>) {
+    pub async fn complete_http_management_service_registration(
+        &self,
+        task_handle: tokio::task::JoinHandle<()>,
+    ) {
         let mut service_guard = self.http_management_service.lock().await;
         if let Some(ref mut service_info) = *service_guard {
             // Abort the placeholder task and replace with the real one

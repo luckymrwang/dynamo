@@ -82,7 +82,8 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler, http_management_port) = self.build_internal()?.dissolve();
+        let (endpoint, lease, handler, stats_handler, http_management_port) =
+            self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
@@ -178,7 +179,13 @@ impl EndpointConfigBuilder {
                     let cancel_token = cancel_token.clone();
                     let drt = endpoint.drt().clone();
                     async move {
-                        match start_aggregated_http_service(http_management_info, port, cancel_token.child_token()).await {
+                        match start_aggregated_http_service(
+                            http_management_info,
+                            port,
+                            cancel_token.child_token(),
+                        )
+                        .await
+                        {
                             Ok(_) => {
                                 tracing::info!("HTTP management service ended");
                                 // Clear the service info when it ends
@@ -194,9 +201,15 @@ impl EndpointConfigBuilder {
                 });
 
                 // Complete the registration with the actual task handle
-                endpoint.drt().complete_http_management_service_registration(http_task).await;
+                endpoint
+                    .drt()
+                    .complete_http_management_service_registration(http_task)
+                    .await;
 
-                tracing::info!("HTTP management service started for endpoint {}", endpoint.path());
+                tracing::info!(
+                    "HTTP management service started for endpoint {}",
+                    endpoint.path()
+                );
             }
             None => {
                 // Another endpoint already started the HTTP service
@@ -217,7 +230,10 @@ impl EndpointConfigBuilder {
             }
         });
 
-        tracing::info!("Endpoint {} started with HTTP management service", endpoint.path());
+        tracing::info!(
+            "Endpoint {} started with HTTP management service",
+            endpoint.path()
+        );
 
         // Wait for endpoint service to complete or shutdown signal
         tokio::select! {
@@ -230,7 +246,6 @@ impl EndpointConfigBuilder {
         // // Start only endpoint service (original behavior)
         // let task = tokio::spawn(push_endpoint.start(service_endpoint));
         // task.await??;
-
 
         Ok(())
     }
@@ -333,7 +348,16 @@ async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<V
     // TODO: Add user-customizable health checks
 
     // Update overall health status based on critical checks
-    if !etcd_healthy || (info.drt.primary_lease().is_some() && info.drt.primary_lease().as_ref().unwrap().primary_token().is_cancelled()) {
+    if !etcd_healthy
+        || (info.drt.primary_lease().is_some()
+            && info
+                .drt
+                .primary_lease()
+                .as_ref()
+                .unwrap()
+                .primary_token()
+                .is_cancelled())
+    {
         overall_healthy = false;
     }
 
@@ -348,7 +372,9 @@ async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<V
     Ok(Json(health_status))
 }
 
-async fn metrics_handler(State(info): State<HttpManagementInfo>) -> Result<Json<Value>, StatusCode> {
+async fn metrics_handler(
+    State(info): State<HttpManagementInfo>,
+) -> Result<Json<Value>, StatusCode> {
     // TODO: Implement actual metrics collection
     Ok(Json(json!({
         "service_type": "distributed_runtime_management",
