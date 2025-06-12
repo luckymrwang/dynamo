@@ -62,7 +62,7 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, private)]
     _stats_handler: Option<EndpointStatsHandler>,
-    
+
     /// HTTP management port (default: auto-assign)
     #[builder(default = Some(0))]
     http_management_port: Option<u16>,
@@ -169,10 +169,10 @@ impl EndpointConfigBuilder {
                 let http_management_info = HttpManagementInfo {
                     drt: endpoint.component.drt.clone(),
                 };
-                
+
                 // Determine port to use
                 let port = http_management_port.unwrap_or(0); // Use 0 for auto-assignment
-                
+
                 let http_task = tokio::spawn({
                     let http_management_info = http_management_info.clone();
                     let cancel_token = cancel_token.clone();
@@ -195,7 +195,7 @@ impl EndpointConfigBuilder {
 
                 // Complete the registration with the actual task handle
                 endpoint.drt().complete_http_management_service_registration(http_task).await;
-                
+
                 tracing::info!("HTTP management service started for endpoint {}", endpoint.path());
             }
             None => {
@@ -250,7 +250,7 @@ async fn start_aggregated_http_service(
     let addr = SocketAddr::from(([0, 0, 0, 0], requested_port));
     let listener = TcpListener::bind(addr).await?;
     let actual_addr = listener.local_addr()?;
-    
+
     tracing::info!("HTTP management service listening on {}", actual_addr);
 
     axum::serve(listener, app)
@@ -272,10 +272,10 @@ async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<V
             "status": if lease_valid { "healthy" } else { "unhealthy" },
             "lease_id": lease.id(),
             "cancelled": lease.primary_token().is_cancelled(),
-            "details": if lease_valid { 
-                "Lease is active and valid" 
-            } else { 
-                "Lease has been cancelled or expired" 
+            "details": if lease_valid {
+                "Lease is active and valid"
+            } else {
+                "Lease has been cancelled or expired"
             }
         });
 
@@ -323,7 +323,7 @@ async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<V
         }
         None => {
             health_checks["etcd"] = json!({
-                "status": "n/a", 
+                "status": "n/a",
                 "details": "No etcd client configured"
             });
             true // Not having etcd isn't necessarily unhealthy

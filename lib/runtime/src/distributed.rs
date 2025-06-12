@@ -169,17 +169,17 @@ impl DistributedRuntime {
     /// Returns Some(()) if this call should start the service, None if already started
     pub async fn try_start_http_management_service(&self) -> Result<Option<()>> {
         let mut service_guard = self.http_management_service.lock().await;
-        
+
         // If service is already running, return None
         if service_guard.is_some() {
             return Ok(None);
         }
-        
+
         // We get to start the service, reserve the slot
-        *service_guard = Some(HttpManagementServiceInfo { 
+        *service_guard = Some(HttpManagementServiceInfo {
             task_handle: tokio::spawn(async {}) // Placeholder task
         });
-        
+
         tracing::info!("Reserved HTTP management service slot");
         Ok(Some(()))
     }
