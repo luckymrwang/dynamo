@@ -39,6 +39,8 @@ struct EndpointInfo {
 #[derive(Clone)]
 struct HttpManagementInfo {
     drt: Arc<DistributedRuntime>,
+    port: u16,
+    component: Component,
 }
 
 #[derive(Educe, Builder, Dissolve)]
@@ -169,6 +171,8 @@ impl EndpointConfigBuilder {
                 // no HTTP started, start it
                 let http_management_info = HttpManagementInfo {
                     drt: endpoint.component.drt.clone(),
+                    port: 0,
+                    component: endpoint.component.clone(),
                 };
 
                 // Determine port to use
@@ -255,7 +259,7 @@ async fn start_aggregated_http_service(
     http_management_info: HttpManagementInfo,
     requested_port: u16,
     cancel_token: crate::CancellationToken,
-) -> Result<()> {
+) -> Result<u16> {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
@@ -265,6 +269,37 @@ async fn start_aggregated_http_service(
     let addr = SocketAddr::from(([0, 0, 0, 0], requested_port));
     let listener = TcpListener::bind(addr).await?;
     let actual_addr = listener.local_addr()?;
+    let actual_port = actual_addr.port();
+
+    // Register HTTP management port to etcd for discovery
+    if let Some(etcd_client) = &http_management_info.drt.etcd_client() {
+        let lease_id = http_management_info
+            .drt
+            .primary_lease()
+            .as_ref()
+            .map(|l| l.id())
+            .unwrap_or(0);
+        let component_path = http_management_info.component.etcd_root();
+        let http_management_path = format!("{}/http_management", component_path);
+        let http_info = json!({
+            "port": actual_port,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+            "lease_id": lease_id
+        });
+        tracing::info!("http_info: {:?}", http_info);
+        tracing::info!("http_management_path: {:?}", http_management_path);
+
+        if let Ok(http_info_bytes) = serde_json::to_vec_pretty(&http_info) {
+            if let Err(e) = etcd_client
+                .kv_put(http_management_path, http_info_bytes, Some(lease_id))
+                .await
+            {
+                tracing::error!("Failed to update HTTP management port: {:?}", e);
+                cancel_token.cancel();
+                return Err(error!("Failed to register discoverable http"));
+            }
+        }
+    }
 
     tracing::info!("HTTP management service listening on {}", actual_addr);
 
@@ -273,7 +308,7 @@ async fn start_aggregated_http_service(
         .await
         .map_err(|e| anyhow::anyhow!("HTTP management service error: {}", e))?;
 
-    Ok(())
+    Ok(actual_port)
 }
 
 async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<Value>, StatusCode> {
