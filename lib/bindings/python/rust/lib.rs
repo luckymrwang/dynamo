@@ -448,7 +448,7 @@ impl Endpoint {
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
         let builder = self.inner.endpoint_builder().handler(ingress);
-        
+
         // Add Python health checks if provided
         let builder = if let Some(handlers) = health_check_handlers {
             let health_check_info = PythonHealthCheckInfo::new(

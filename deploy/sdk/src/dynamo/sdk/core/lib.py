@@ -14,10 +14,10 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import asyncio
 import logging
 import os
 from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
-import asyncio
 
 from fastapi import FastAPI
 
@@ -187,17 +187,21 @@ def health_check(func):
     The function must return a tuple of (status, details) where status is either 'healthy' or 'unhealthy'
     and details is a string describing the health status.
     """
+
     def wrapper(*args, **kwargs):
         result = func(*args, **kwargs)
         if asyncio.iscoroutine(result):
             # wait for the result if it's a coroutine
             result = asyncio.run(result)
         if not isinstance(result, tuple) or len(result) != 2:
-            raise ValueError("Health check function must return (status, details) tuple")
+            raise ValueError(
+                "Health check function must return (status, details) tuple"
+            )
         status, details = result
-        if status not in ['healthy', 'unhealthy']:
+        if status not in ["healthy", "unhealthy"]:
             raise ValueError("status must be 'healthy' or 'unhealthy'")
-        return (status, details) # return a tuple
+        return (status, details)  # return a tuple
+
     return wrapper
 
 
