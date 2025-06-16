@@ -13,11 +13,12 @@ use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
 use dynamo_runtime::{
-    self as rs, logging,
+    self as rs,
+    component::endpoint::PythonHealthCheckInfo,
+    logging,
     pipeline::{EngineStream, ManyOut, SingleIn},
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
-    component::endpoint::PythonHealthCheckInfo,
 };
 
 use dynamo_llm::{self as llm_rs};
@@ -451,10 +452,7 @@ impl Endpoint {
 
         // Add Python health checks if provided
         let builder = if let Some(handlers) = health_check_handlers {
-            let health_check_info = PythonHealthCheckInfo::new(
-                handlers,
-                self.event_loop.clone(),
-            );
+            let health_check_info = PythonHealthCheckInfo::new(handlers, self.event_loop.clone());
             builder.python_health_checks(Some(health_check_info))
         } else {
             builder
