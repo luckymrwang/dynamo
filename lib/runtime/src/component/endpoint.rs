@@ -18,6 +18,10 @@ use derive_getters::Dissolve;
 use super::*;
 
 use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
+use pyo3::{
+    types::PyAny, types::PyAnyMethods, types::PyDict, types::PyTuple, DowncastError, FromPyObject,
+    Py, PyErr, PyObject, Python,
+};
 use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -41,6 +45,22 @@ struct HttpManagementInfo {
     drt: Arc<DistributedRuntime>,
     port: u16,
     component: Component,
+    python_health_checks: Option<PythonHealthCheckInfo>,
+}
+
+#[derive(Clone)]
+pub struct PythonHealthCheckInfo {
+    handlers: Arc<Vec<PyObject>>,
+    event_loop: Arc<PyObject>,
+}
+
+impl PythonHealthCheckInfo {
+    pub fn new(handlers: Vec<PyObject>, event_loop: PyObject) -> Self {
+        Self {
+            handlers: Arc::new(handlers),
+            event_loop: Arc::new(event_loop),
+        }
+    }
 }
 
 #[derive(Educe, Builder, Dissolve)]
@@ -68,6 +88,11 @@ pub struct EndpointConfig {
     /// HTTP management port (default: auto-assign)
     #[builder(default = Some(0))]
     http_management_port: Option<u16>,
+
+    /// Python health check handlers
+    #[educe(Debug(ignore))]
+    #[builder(default)]
+    python_health_checks: Option<PythonHealthCheckInfo>,
 }
 
 impl EndpointConfigBuilder {
@@ -84,7 +109,7 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler, http_management_port) =
+        let (endpoint, lease, handler, stats_handler, http_management_port, python_health_checks) =
             self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
@@ -171,8 +196,9 @@ impl EndpointConfigBuilder {
                 // no HTTP started, start it
                 let http_management_info = HttpManagementInfo {
                     drt: endpoint.component.drt.clone(),
-                    port: 0,
+                    port: http_management_port.unwrap_or(0),
                     component: endpoint.component.clone(),
+                    python_health_checks: python_health_checks,
                 };
 
                 // Determine port to use
@@ -380,7 +406,37 @@ async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<V
         }
     };
 
-    // TODO: Add user-customizable health checks
+    // Run Python health checks if available
+    if let Some(python_health_checks) = &info.python_health_checks {
+        for (i, handler) in python_health_checks.handlers.iter().enumerate() {
+            let check_name = format!("python_check_{}", i);
+            match Python::with_gil(|py| {
+                let result = handler.call0(py)?;
+                let result_tuple = result.into_bound(py);
+                let status = result_tuple.get_item(0)?.extract::<String>()?;
+                let details = result_tuple.get_item(1)?.extract::<String>()?;
+                Ok::<(String, String), PyErr>((status, details))
+            }) {
+                Ok((status, details)) => {
+                    health_checks[check_name] = json!({
+                        "status": status,
+                        "details": details
+                    });
+                    if status == "unhealthy" {
+                        overall_healthy = false;
+                    }
+                }
+                Err(e) => {
+                    health_checks[check_name] = json!({
+                        "status": "unhealthy",
+                        "error": format!("{}", e),
+                        "details": "Python health check failed"
+                    });
+                    overall_healthy = false;
+                }
+            }
+        }
+    }
 
     // Update overall health status based on critical checks
     if !etcd_healthy
@@ -404,7 +460,12 @@ async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<V
         "checks": health_checks
     });
 
-    Ok(Json(health_status))
+    // Return different HTTP status codes based on overall health status
+    if overall_healthy {
+        Ok(Json(health_status))
+    } else {
+        Err(StatusCode::SERVICE_UNAVAILABLE)
+    }
 }
 
 async fn metrics_handler(

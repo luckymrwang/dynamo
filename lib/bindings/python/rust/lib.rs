@@ -17,6 +17,7 @@ use dynamo_runtime::{
     pipeline::{EngineStream, ManyOut, SingleIn},
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
+    component::endpoint::PythonHealthCheckInfo,
 };
 
 use dynamo_llm::{self as llm_rs};
@@ -434,11 +435,12 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator))]
+    #[pyo3(signature = (generator, health_check_handlers=None))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
+        health_check_handlers: Option<Vec<PyObject>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -446,6 +448,18 @@ impl Endpoint {
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
         let builder = self.inner.endpoint_builder().handler(ingress);
+        
+        // Add Python health checks if provided
+        let builder = if let Some(handlers) = health_check_handlers {
+            let health_check_info = PythonHealthCheckInfo::new(
+                handlers,
+                self.event_loop.clone(),
+            );
+            builder.python_health_checks(Some(health_check_info))
+        } else {
+            builder
+        };
+
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             builder.start().await.map_err(to_pyerr)?;
             Ok(())

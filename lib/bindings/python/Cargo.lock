@@ -1216,6 +1216,7 @@ dependencies = [
  "nuid",
  "once_cell",
  "prometheus",
+ "pyo3",
  "rand 0.9.1",
  "regex",
  "serde",
