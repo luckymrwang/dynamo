@@ -198,7 +198,7 @@ impl EndpointConfigBuilder {
                     drt: endpoint.component.drt.clone(),
                     port: http_management_port.unwrap_or(0),
                     component: endpoint.component.clone(),
-                    python_health_checks: python_health_checks,
+                    python_health_checks,
                 };
 
                 // Determine port to use
