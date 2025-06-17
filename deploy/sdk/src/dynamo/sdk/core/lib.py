@@ -17,6 +17,7 @@
 import asyncio
 import logging
 import os
+import functools
 from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
 
 from fastapi import FastAPI
@@ -187,12 +188,15 @@ def health_check(func):
     The function must return a tuple of (status, details) where status is either 'healthy' or 'unhealthy'
     and details is a string describing the health status.
     """
-
+    @functools.wraps(func)
     def wrapper(*args, **kwargs):
         result = func(*args, **kwargs)
         if asyncio.iscoroutine(result):
-            # wait for the result if it's a coroutine
-            result = asyncio.run(result)
+            try:
+                loop = asyncio.get_running_loop()
+                result = loop.run_until_complete(result)    # Already in event loop
+            except RuntimeError:
+                result = asyncio.run(result)                # No event loop
         if not isinstance(result, tuple) or len(result) != 2:
             raise ValueError(
                 "Health check function must return (status, details) tuple"
@@ -200,8 +204,9 @@ def health_check(func):
         status, details = result
         if status not in ["healthy", "unhealthy"]:
             raise ValueError("status must be 'healthy' or 'unhealthy'")
-        return (status, details)  # return a tuple
+        return (status, details)
 
+    wrapper.__is_health_check__ = True      # Add a marker to the wrapper function
     return wrapper
 
 

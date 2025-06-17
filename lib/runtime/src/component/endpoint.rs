@@ -48,6 +48,8 @@ struct HttpManagementInfo {
     python_health_checks: Option<PythonHealthCheckInfo>,
 }
 
+unsafe impl Send for PythonHealthCheckInfo {}
+unsafe impl Sync for PythonHealthCheckInfo {}
 #[derive(Clone)]
 pub struct PythonHealthCheckInfo {
     handlers: Arc<Vec<PyObject>>,
@@ -322,6 +324,10 @@ async fn start_aggregated_http_service(
             {
                 tracing::error!("Failed to update HTTP management port: {:?}", e);
                 cancel_token.cancel();
+                http_management_info
+                    .drt
+                    .clear_http_management_service()
+                    .await;
                 return Err(error!("Failed to register discoverable http"));
             }
         }
