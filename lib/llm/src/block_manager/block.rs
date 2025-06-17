@@ -1545,14 +1545,9 @@ pub mod test_utils {
 mod tests {
     use super::*;
 
-    
-
     use super::super::layout::tests::setup_layout;
-    
-    use crate::tokens::{TokenBlockSequence, Tokens};
 
-    
-    
+    use crate::tokens::{TokenBlockSequence, Tokens};
 
     const BLOCK_SIZE: usize = 4;
     const SALT_HASH: SaltHash = 12345;
