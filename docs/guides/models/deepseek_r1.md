@@ -39,7 +39,7 @@ Before starting, ensure you have:
 
     ```bash
     # Build for ARM architecture (required for GB200)
-    # For x86 machines, remove the `--platform` flag.
+    # For x86 machines, remove the `--platform` flag
     ./container/build.sh --framework tensorrtllm --platform linux/arm64
     ```
 
