@@ -76,7 +76,7 @@ Before starting, ensure you have:
     >    image instead of `dynamo:latest-tensorrtllm` will make it easier to distribute and
     >    re-use across nodes and environments.
 
-### Environment Variable Setup
+### Environment Setup
 
 1. On the head node, start core services:
     ```bash
