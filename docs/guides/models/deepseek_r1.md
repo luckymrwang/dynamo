@@ -237,10 +237,16 @@ genai-perf profile \
 - Check network connectivity between nodes and GPUs (RDMA, Infiniband, etc.)
 
 3. (Slurm Clusters Only) MPI Spawn Failure:
-```bash
-# If you encounter MPI spawn errors on Slurm clusters, unset these variables:
-unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
-```
+
+    If you encounter errors related to MPI Spawn failure from TRTLLM when running
+    on a Slurm cluster interactively, try temporarily unsetting these variables:
+
+    ```bash
+    unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
+    ```
+
+    The more proper solution may be to launch any MPI based jobs with
+    `srun` rather than interactively.
 
 ### Performance Tuning
 
