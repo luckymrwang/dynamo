@@ -22,7 +22,7 @@ Before starting, ensure you have:
     ./container/build.sh --framework tensorrtllm --platform linux/arm64
     ```
 
-    > **Tip: Experimental Features**
+    > [!Tip]
     >
     > For features like Multi-Token Prediction (MTP) and WideEP that may not be in a pre-built wheel yet, use the experimental TensorRT-LLM build to build TensorRT-LLM from source:
     > ```bash
@@ -46,7 +46,9 @@ Before starting, ensure you have:
         dynamo:latest-tensorrtllm
     ```
 
-    > **Tip: Docker Recommendations**
+    > [!Tip]
+    >
+    > Docker Recommendations:
     > 1. Mounting HF cache to host is optional, but recommended for repeated runs.
     >    You can replace /tmp/hf_cache with ~/.cache/huggingface or any path you'd like to mount.
     > 2. Publishing your Dynamo-TRTLLM image to a container registry, and pulling that
@@ -185,10 +187,10 @@ genai-perf profile \
   --request-count $(($CONCURRENCY*10)) \
   --warmup-request-count $(($CONCURRENCY*2)) \
   --num-dataset-entries $(($CONCURRENCY*12)) \
-  --random-seed 100
+  --random-seed 100 \
   -- \
   -v \
-  --max-threads ${concurrency}
+  --max-threads ${CONCURRENCY}
 ```
 
 ## Troubleshooting
