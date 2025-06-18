@@ -45,7 +45,8 @@ Before starting, ensure you have:
 
 > [!Tip]
 >
-> For features like Multi-Token Prediction (MTP) and WideEP that may not be in a pre-built wheel yet, use the experimental TensorRT-LLM build to build TensorRT-LLM from source:
+> For the latest experimental features and bug fixes in TRTLLM that may not be in a released pip wheel yet, use the experimental TensorRT-LLM build to build TensorRT-LLM from source:
+>
 > ```bash
 > # Install git-lfs if not already installed
 > apt-get update && apt-get -y install git git-lfs
@@ -53,6 +54,7 @@ Before starting, ensure you have:
 > # Build TRTLLM from source
 > ./container/build.sh --framework tensorrtllm --platform linux/arm64 --use-default-experimental-tensorrtllm-commit
 > ```
+>
 > Note that building from source may not go through the same testing as released pre-built wheels,
 > and that the build may take several hours. However, it can be handy when there is a bug fix
 > on the repository that hasn't yet been released in a pre-built wheel yet.
