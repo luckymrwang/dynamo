@@ -43,19 +43,19 @@ Before starting, ensure you have:
     ./container/build.sh --framework tensorrtllm --platform linux/arm64
     ```
 
-    > [!Tip]
-    >
-    > For features like Multi-Token Prediction (MTP) and WideEP that may not be in a pre-built wheel yet, use the experimental TensorRT-LLM build to build TensorRT-LLM from source:
-    > ```bash
-    > # Install git-lfs if not already installed
-    > apt-get update && apt-get -y install git git-lfs
-    >
-    > # Build TRTLLM from source
-    > ./container/build.sh --framework tensorrtllm --platform linux/arm64 --use-default-experimental-tensorrtllm-commit
-    > ```
-    > Note that building from source may not go through the same testing as released pre-built wheels,
-    > and that the build may take several hours. However, it can be handy when there is a bug fix
-    > on the repository that hasn't yet been released in a pre-built wheel yet.
+> [!Tip]
+>
+> For features like Multi-Token Prediction (MTP) and WideEP that may not be in a pre-built wheel yet, use the experimental TensorRT-LLM build to build TensorRT-LLM from source:
+> ```bash
+> # Install git-lfs if not already installed
+> apt-get update && apt-get -y install git git-lfs
+>
+> # Build TRTLLM from source
+> ./container/build.sh --framework tensorrtllm --platform linux/arm64 --use-default-experimental-tensorrtllm-commit
+> ```
+> Note that building from source may not go through the same testing as released pre-built wheels,
+> and that the build may take several hours. However, it can be handy when there is a bug fix
+> on the repository that hasn't yet been released in a pre-built wheel yet.
 
 3. On all nodes, run the container:
 
@@ -67,14 +67,14 @@ Before starting, ensure you have:
         dynamo:latest-tensorrtllm
     ```
 
-    > [!Tip]
-    >
-    > Docker Recommendations:
-    > 1. Mounting HF cache to host is optional, but recommended for repeated runs.
-    >    You can replace /tmp/hf_cache with ~/.cache/huggingface or any path you'd like to mount.
-    > 2. Publishing your Dynamo-TRTLLM image to a container registry, and pulling that
-    >    image instead of `dynamo:latest-tensorrtllm` will make it easier to distribute and
-    >    re-use across nodes and environments.
+> [!Tip]
+>
+> Docker Recommendations:
+> 1. Mounting HF cache to host is optional, but recommended for repeated runs.
+>    You can replace /tmp/hf_cache with ~/.cache/huggingface or any path you'd like to mount.
+> 2. Publishing your Dynamo-TRTLLM image to a container registry, and pulling that
+>    image instead of `dynamo:latest-tensorrtllm` will make it easier to distribute and
+>    re-use across nodes and environments.
 
 ### Environment Setup
 
