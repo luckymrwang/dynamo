@@ -1,6 +1,21 @@
 # Deploying DeepSeek R1 with Dynamo and TensorRT-LLM on GB200
 
-This guide provides step-by-step instructions for deploying DeepSeek R1 using Dynamo with TensorRT-LLM backend on GB200 systems. It covers both single-node and multi-node deployments, including aggregated and disaggregated serving configurations.
+This guide provides step-by-step instructions for deploying DeepSeek R1 using
+Dynamo with TensorRT-LLM backend on GB200 systems.
+
+## Table of Contents
+
+- [Setup](#setup)
+- [Deployment](#deployment)
+  - [Aggregated Deployment](#aggregated-deployment)
+  - [Disaggregated Deployment](#disaggregated-deployment)
+- [Benchmarking](#benchmarking)
+  - [Setup](#setup-1)
+  - [Running Benchmarks](#running-benchmarks)
+- [Troubleshooting](#troubleshooting)
+  - [Common Issues](#common-issues)
+  - [Performance Tuning](#performance-tuning)
+- [Next Steps](#next-steps)
 
 ## Setup
 
@@ -12,7 +27,7 @@ Before starting, ensure you have:
 - Access to Docker containers on all nodes
 - Network connectivity between all nodes
 
-### Environment Setup
+### Container Setup
 
 1. Clone the Dynamo repository and build the container:
 
@@ -36,7 +51,7 @@ Before starting, ensure you have:
     > and that the build may take several hours. However, it can be handy when there is a bug fix
     > on the repository that hasn't yet been released in a pre-built wheel yet.
 
-2. Run the container:
+2. On all nodes, run the container:
 
     ```bash
     docker run -it \
@@ -55,16 +70,7 @@ Before starting, ensure you have:
     >    image instead of `dynamo:latest-tensorrtllm` will make it easier to distribute and
     >    re-use across nodes and environments.
 
-## Deployment
-
-For simplicity, these steps assume that the model being deployed fits
-on a single node, and that every worker (whether aggregated, prefill-only,
-or decode-only) will be launched on independent nodes.
-
-For example, `nvidia/DeepSeek-R1-FP4` with Tensor Parallelism and Expert
-Parallelism set to 4 on a 4xGB200 node.
-
-### Network Setup
+### Environment Variable Setup
 
 1. On the head node, start core services:
     ```bash
@@ -81,6 +87,17 @@ Parallelism set to 4 on a 4xGB200 node.
     export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
     export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
     ```
+
+
+
+## Deployment
+
+For simplicity, these steps assume that the model being deployed fits
+on a single node, and that every worker (whether aggregated, prefill-only,
+or decode-only) will be launched on independent nodes.
+
+For example, `nvidia/DeepSeek-R1-FP4` with Tensor Parallelism and Expert
+Parallelism set to 4 on a 4xGB200 node.
 
 ### Aggregated Deployment
 
