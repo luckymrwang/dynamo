@@ -29,7 +29,13 @@ Before starting, ensure you have:
 
 ### Container Setup
 
-1. Clone the Dynamo repository and build the container:
+1. Clone the Dynamo repository:
+    ```bash
+    git clone -b release/0.3.1 https://github.com/ai-dynamo/dynamo.git
+    cd dynamo
+    ```
+
+2. Build the container:
 
     ```bash
     # Build for ARM architecture (required for GB200)
@@ -51,7 +57,7 @@ Before starting, ensure you have:
     > and that the build may take several hours. However, it can be handy when there is a bug fix
     > on the repository that hasn't yet been released in a pre-built wheel yet.
 
-2. On all nodes, run the container:
+3. On all nodes, run the container:
 
     ```bash
     docker run -it \
