@@ -244,12 +244,17 @@ unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
 
 ### Performance Tuning
 
-1. Ratio of P/D instances:
-    - experiment with different ratios of P and D instances
-    for disaggregated serving. This is crucial to overall performance/efficiency,
+1. Expriment with Ratio of # Prefill/Decode instances:
+
+    This is crucial to overall performance/efficiency of disaggregated serving,
     and is sensitive to the input/output sequence lengths received by the server.
 
+    For example, for very long inputs and very short outputs, it
+    may require multiple prefill instances to generate enough load for
+    a single decode instance to be fully saturated, and vice versa.
+
 2. DP Attention (enable for max throughput, disable for min latency):
+
     ```yaml
     # configs/deepseek/*_llm_api_config.yaml
     enable_attention_dp: true
@@ -257,10 +262,11 @@ unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
 
 3. Tensor or Expert Parallel Size:
 
-If using different hardware like DGX B200 (ex: 8xB200 GPUs instead of 4xGB200), you can
-also experiment with the parallelism settings to use all the available GPUs:
+    If using different hardware like DGX B200 (ex: 8xB200 GPUs instead of 4xGB200), you can
+    also experiment with the parallelism settings to use all the available GPUs:
+
     ```yaml
-# configs/deepseek/*_llm_api_config.yaml
+    # configs/deepseek/*_llm_api_config.yaml
     tensor_parallel_size: 4     # Adjust based on your GPU count
     moe_expert_parallel_size: 4 # Adjust based on your GPU count
     ```
