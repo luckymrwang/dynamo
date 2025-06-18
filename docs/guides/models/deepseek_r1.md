@@ -247,23 +247,23 @@ unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
 1. Ratio of P/D instances:
     - experiment with different ratios of P and D instances
     for disaggregated serving. This is crucial to overall performance/efficiency,
-    and is sensitive to the average input/output sequence lengths received by the server.
+    and is sensitive to the input/output sequence lengths received by the server.
 
 2. DP Attention (enable for max throughput, disable for min latency):
-```yaml
-# configs/deepseek/*_llm_api_config.yaml
-enable_attention_dp: true
-```
+    ```yaml
+    # configs/deepseek/*_llm_api_config.yaml
+    enable_attention_dp: true
+    ```
 
 3. Tensor or Expert Parallel Size:
 
 If using different hardware like DGX B200 (ex: 8xB200 GPUs instead of 4xGB200), you can
-also experiment with the parallelism settings to use all the available GPUs
-```yaml
+also experiment with the parallelism settings to use all the available GPUs:
+    ```yaml
 # configs/deepseek/*_llm_api_config.yaml
-tensor_parallel_size: 4     # Adjust based on your GPU count
-moe_expert_parallel_size: 4 # Adjust based on your GPU count
-```
+    tensor_parallel_size: 4     # Adjust based on your GPU count
+    moe_expert_parallel_size: 4 # Adjust based on your GPU count
+    ```
 
 For TRTLLM-specific configuration recommendations, see the guide on
 [how to get best performance on DeepSeek-R1 in TensorRT-LLM
