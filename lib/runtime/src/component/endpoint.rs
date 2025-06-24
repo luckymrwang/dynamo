@@ -26,18 +26,9 @@ use serde_json::{json, Value};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
+use tokio_util::sync::CancellationToken;
 
 pub use async_nats::service::endpoint::Stats as EndpointStats;
-
-#[derive(Clone)]
-struct EndpointInfo {
-    namespace: String,
-    component: String,
-    endpoint: String,
-    instance_id: i64,
-    lease: Option<Lease>,
-    drt: Arc<DistributedRuntime>,
-}
 
 /// Aggregated information for HTTP management service covering multiple endpoints
 #[derive(Clone)]
@@ -211,7 +202,7 @@ impl EndpointConfigBuilder {
                     let cancel_token = cancel_token.clone();
                     let drt = endpoint.drt().clone();
                     async move {
-                        match start_aggregated_http_service(
+                        match start_http_service(
                             http_management_info,
                             port,
                             cancel_token.child_token(),
@@ -219,12 +210,10 @@ impl EndpointConfigBuilder {
                         .await
                         {
                             Ok(_) => {
-                                tracing::info!("HTTP management service ended");
                                 // Clear the service info when it ends
                                 drt.clear_http_management_service().await;
                             }
                             Err(e) => {
-                                tracing::error!("HTTP management service failed: {}", e);
                                 // Clear the service info on error
                                 drt.clear_http_management_service().await;
                             }
@@ -238,14 +227,13 @@ impl EndpointConfigBuilder {
                     .complete_http_management_service_registration(http_task)
                     .await;
 
-                tracing::info!(
+                tracing::debug!(
                     "HTTP management service started for endpoint {}",
                     endpoint.path()
                 );
             }
             None => {
                 // Another endpoint already started the HTTP service
-                tracing::info!("HTTP management service already running for this DRT");
             }
         };
 
@@ -254,15 +242,14 @@ impl EndpointConfigBuilder {
             let endpoint = push_endpoint;
             let service_endpoint = service_endpoint;
             async move {
-                tracing::info!("Starting endpoint service");
                 match endpoint.start(service_endpoint).await {
-                    Ok(_) => tracing::info!("Endpoint service ended"),
+                    Ok(_) => tracing::debug!("Endpoint service ended"),
                     Err(e) => tracing::error!("Endpoint service failed: {}", e),
                 }
             }
         });
 
-        tracing::info!(
+        tracing::debug!(
             "Endpoint {} started with HTTP management service",
             endpoint.path()
         );
@@ -283,15 +270,14 @@ impl EndpointConfigBuilder {
     }
 }
 
-async fn start_aggregated_http_service(
+async fn start_http_service(
     http_management_info: HttpManagementInfo,
     requested_port: u16,
-    cancel_token: crate::CancellationToken,
+    cancel_token: CancellationToken,
 ) -> Result<u16> {
     let app = Router::new()
         .route("/health", get(health_handler))
         .route("/metrics", get(metrics_handler))
-        .route("/info", get(info_handler))
         .with_state(http_management_info.clone());
 
     let addr = SocketAddr::from(([0, 0, 0, 0], requested_port));
@@ -314,8 +300,6 @@ async fn start_aggregated_http_service(
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "lease_id": lease_id
         });
-        tracing::info!("http_info: {:?}", http_info);
-        tracing::info!("http_management_path: {:?}", http_management_path);
 
         if let Ok(http_info_bytes) = serde_json::to_vec_pretty(&http_info) {
             if let Err(e) = etcd_client
@@ -333,7 +317,7 @@ async fn start_aggregated_http_service(
         }
     }
 
-    tracing::info!("HTTP management service listening on {}", actual_addr);
+    tracing::debug!("HTTP management service listening on {}", actual_addr);
 
     axum::serve(listener, app)
         .with_graceful_shutdown(cancel_token.cancelled_owned())
@@ -486,13 +470,5 @@ async fn metrics_handler(
             "requests_active": 0,
             "uptime_seconds": 0
         }
-    })))
-}
-
-async fn info_handler(State(info): State<HttpManagementInfo>) -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({
-        "service_type": "distributed_runtime_management",
-        "instance_id": info.drt.primary_lease().as_ref().map(|l| l.id()).unwrap_or(0),
-        "is_static": info.drt.is_static,
     })))
 }
