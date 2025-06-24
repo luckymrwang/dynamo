@@ -25,7 +25,7 @@ use std::{
 };
 
 use crate::{
-    component::{Client, Endpoint, InstanceSource},
+    entity::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
     pipeline::{AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn},
     traits::DistributedRuntimeProvider,
@@ -111,15 +111,16 @@ where
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    self.client.endpoint
                 ));
             }
             let offset = counter % count as u64;
-            instances[offset as usize].id()
+            instances[offset as usize].key.instance_id().unwrap()
+
         };
         tracing::trace!("round robin router selected {instance_id}");
 
-        let subject = self.client.endpoint.subject_to(instance_id);
+        let subject = self.client.endpoint.to_string();
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         self.addressed.generate(request).await
@@ -133,16 +134,16 @@ where
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {:?}",
-                    self.client.endpoint.etcd_root()
+                    self.client.endpoint
                 ));
             }
             let counter = rand::rng().random::<u64>();
             let offset = counter % count as u64;
-            instances[offset as usize].id()
+            instances[offset as usize].key.instance_id().unwrap()
         };
         tracing::trace!("random router selected {instance_id}");
 
-        let subject = self.client.endpoint.subject_to(instance_id);
+        let subject = self.client.endpoint.to_string();
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         self.addressed.generate(request).await
@@ -156,24 +157,24 @@ where
     ) -> anyhow::Result<ManyOut<U>> {
         let found = {
             let instances = self.client.instances();
-            instances.iter().any(|ep| ep.id() == instance_id)
+            instances.iter().any(|ep| ep.key.instance_id() == Some(instance_id))
         };
 
         if !found {
             return Err(anyhow::anyhow!(
                 "instance_id={instance_id} not found for endpoint {:?}",
-                self.client.endpoint.etcd_root()
+                self.client.endpoint
             ));
         }
 
-        let subject = self.client.endpoint.subject_to(instance_id);
+        let subject = self.client.endpoint.to_string();
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         self.addressed.generate(request).await
     }
 
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let subject = self.client.endpoint.subject();
+        let subject = self.client.endpoint.to_string();
         tracing::debug!("static got subject: {subject}");
         let request = request.map(|req| AddressedRequest::new(req, subject));
         tracing::debug!("router generate");

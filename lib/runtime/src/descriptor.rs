@@ -77,6 +77,9 @@
 use once_cell::sync::Lazy;
 use std::str::FromStr;
 use validator::ValidationError;
+use serde::{Deserialize, Serialize};
+
+use crate::slug::Slug;
 
 pub const ETCD_ROOT_PATH: &str = "dynamo://";
 pub const COMPONENT_KEYWORD: &str = "_component_";
@@ -308,7 +311,7 @@ impl DynamoPath {
 
 /// Pure data descriptor for component identification
 /// Owns the canonical path format and validation logic
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Identifier {
     namespace: String,
     component: Option<String>,
@@ -383,6 +386,29 @@ impl Identifier {
 
         Ok(())
     }
+
+    /// Generate a slugified subject string for event publishing
+    pub fn slug(&self) -> Slug {
+        Slug::slugify_unique(&self.to_string())
+    }
+
+    /// Create a namespace-only identifier from this identifier
+    pub fn to_namespace(&self) -> Identifier {
+        Identifier {
+            namespace: self.namespace.clone(),
+            component: None,
+            endpoint: None,
+        }
+    }
+
+    /// Create a component identifier from this identifier (requires component to be present)
+    pub fn to_component(&self) -> Option<Identifier> {
+        self.component.as_ref().map(|comp| Identifier {
+            namespace: self.namespace.clone(),
+            component: Some(comp.clone()),
+            endpoint: None,
+        })
+    }
 }
 
 impl std::fmt::Display for Identifier {
@@ -421,7 +447,7 @@ impl TryFrom<&str> for Identifier {
 
 /// Identifier extended with instance_id (lease_id)
 /// Immutable - identifier cannot be changed after construction
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Instance {
     identifier: Identifier,  // Private to enforce immutability
     instance_id: Option<i64>,
@@ -481,6 +507,15 @@ impl Instance {
     pub fn instance_id(&self) -> Option<i64> {
         self.instance_id
     }
+
+    pub fn is_static(&self) -> bool {
+        self.is_static
+    }
+
+    /// Generate a slugified subject string for event publishing
+    pub fn slug(&self) -> Slug {
+        Slug::slugify_unique(&self.to_string())
+    }
 }
 
 impl std::fmt::Display for Instance {
@@ -525,14 +560,14 @@ impl TryFrom<&str> for Instance {
 
 /// Descriptor with additional path segments for extended paths
 /// Always inserts _path_ before the segments
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Keys {
     base: KeysBase,  // Either Identifier or Instance
     keys: Vec<String>,
 }
 
 /// Base can be either Identifier or Instance
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum KeysBase {
     Identifier(Identifier),
     Instance(Instance),
@@ -577,6 +612,11 @@ impl Keys {
     /// Get the additional keys
     pub fn keys(&self) -> &[String] {
         &self.keys
+    }
+
+    /// Generate a slugified subject string for event publishing
+    pub fn slug(&self) -> Slug {
+        Slug::slugify_unique(&self.to_string())
     }
 
 }
@@ -772,6 +812,47 @@ mod tests {
             .parse()
             .unwrap();
         assert_eq!(id.endpoint_name(), Some("http"));
+    }
+
+    #[test]
+    fn test_identifier_conversions() {
+        // Create a full endpoint identifier
+        let full_id = Identifier::new_endpoint("production.api", "gateway", "http").unwrap();
+        assert_eq!(full_id.to_string(), "dynamo://production.api/_component_/gateway/_endpoint_/http");
+
+        // Convert to namespace-only
+        let ns_id = full_id.to_namespace();
+        assert_eq!(ns_id.to_string(), "dynamo://production.api");
+        assert_eq!(ns_id.namespace_name(), "production.api");
+        assert_eq!(ns_id.component_name(), None);
+        assert_eq!(ns_id.endpoint_name(), None);
+
+        // Convert to component-only
+        let comp_id = full_id.to_component().unwrap();
+        assert_eq!(comp_id.to_string(), "dynamo://production.api/_component_/gateway");
+        assert_eq!(comp_id.namespace_name(), "production.api");
+        assert_eq!(comp_id.component_name(), Some("gateway"));
+        assert_eq!(comp_id.endpoint_name(), None);
+
+                // Test with component-only identifier
+        let comp_only = Identifier::new_component("ns", "comp").unwrap();
+
+        let ns_from_comp = comp_only.to_namespace();
+        assert_eq!(ns_from_comp.to_string(), "dynamo://ns");
+
+        let comp_from_comp = comp_only.to_component().unwrap();
+        assert_eq!(comp_from_comp.to_string(), "dynamo://ns/_component_/comp");
+        assert_eq!(comp_from_comp, comp_only);
+
+        // Test with namespace-only identifier
+        let ns_only = Identifier::new_namespace("ns").unwrap();
+
+        let ns_from_ns = ns_only.to_namespace();
+        assert_eq!(ns_from_ns.to_string(), "dynamo://ns");
+        assert_eq!(ns_from_ns, ns_only);
+
+        // Should return None when trying to get component from namespace-only
+        assert!(ns_only.to_component().is_none());
     }
 
     #[test]

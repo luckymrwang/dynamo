@@ -15,9 +15,12 @@
 
 use derive_getters::Dissolve;
 
+use crate::entity::client::TransportType;
+
 use super::*;
 
 pub use async_nats::service::endpoint::Stats as EndpointStats;
+use crate::entity::client::StoredTransport;
 
 #[derive(Educe, Builder, Dissolve)]
 #[educe(Debug)]
@@ -25,12 +28,6 @@ pub use async_nats::service::endpoint::Stats as EndpointStats;
 pub struct EndpointConfig {
     #[builder(private)]
     endpoint: Endpoint,
-
-    // todo: move lease to component/service
-    /// Lease
-    #[educe(Debug(ignore))]
-    #[builder(default)]
-    lease: Option<Lease>,
 
     /// Endpoint handler
     #[educe(Debug(ignore))]
@@ -55,16 +52,7 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler) = self.build_internal()?.dissolve();
-        let lease = lease.or(endpoint.drt().primary_lease());
-        let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
-
-        tracing::debug!(
-            "Starting endpoint: {}",
-            endpoint.etcd_path_with_lease_id(lease_id)
-        );
-
-        let service_name = endpoint.component.service_name();
+        let (endpoint, handler, stats_handler) = self.build_internal()?.dissolve();
 
         // acquire the registry lock
         let registry = endpoint.drt().component_registry.inner.lock().await;
@@ -72,14 +60,14 @@ impl EndpointConfigBuilder {
         // get the group
         let group = registry
             .services
-            .get(&service_name)
-            .map(|service| service.group(endpoint.component.service_name()))
+            .get(&endpoint.to_descriptor().identifier().to_component().unwrap())
+            .map(|service| service.group(endpoint.to_descriptor().slug()))
             .ok_or(error!("Service not found"))?;
 
         // get the stats handler map
         let handler_map = registry
             .stats_handlers
-            .get(&service_name)
+            .get(&endpoint.to_descriptor().identifier().to_component().unwrap())
             .cloned()
             .expect("no stats handler registry; this is unexpected");
 
@@ -90,18 +78,17 @@ impl EndpointConfigBuilder {
             handler_map
                 .lock()
                 .unwrap()
-                .insert(endpoint.subject_to(lease_id), stats_handler);
+                .insert(endpoint.to_descriptor().slug(), stats_handler);
         }
 
         // creates an endpoint for the service
         let service_endpoint = group
-            .endpoint(&endpoint.name_with_id(lease_id))
+            .endpoint(&endpoint.to_descriptor().slug())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start endpoint: {e}"))?;
 
-        let cancel_token = lease
-            .map(|l| l.child_token())
-            .unwrap_or_else(|| endpoint.drt().child_token());
+        let storage = endpoint.storage()?;
+        let cancel_token = storage.primary_lease().child_token();
 
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
@@ -109,38 +96,59 @@ impl EndpointConfigBuilder {
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 
-        // launch in primary runtime
-        let task = tokio::spawn(push_endpoint.start(service_endpoint));
-
-        // make the components service endpoint discovery in etcd
-
-        // client.register_service()
-        let info = Instance {
-            component: endpoint.component.name.clone(),
-            endpoint: endpoint.name.clone(),
-            namespace: endpoint.component.namespace.name.clone(),
-            instance_id: lease_id,
-            transport: TransportType::NatsTcp(endpoint.subject_to(lease_id)),
+        let info = StoredTransport{
+            key: endpoint.to_descriptor(),
+            value: TransportType::NatsTcp(endpoint.to_descriptor().slug().to_string())
         };
 
+        // 1. Register in storage first
         let info = serde_json::to_vec_pretty(&info)?;
 
-        if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
-            if let Err(e) = etcd_client
-                .kv_create(
-                    endpoint.etcd_path_with_lease_id(lease_id),
-                    info,
-                    Some(lease_id),
-                )
-                .await
-            {
-                tracing::error!("Failed to register discoverable service: {:?}", e);
-                cancel_token.cancel();
-                return Err(error!("Failed to register discoverable service"));
-            }
+        if let Err(e) = storage.create(info.clone(), None).await {
+            tracing::error!("Failed to register discoverable service: {:?}", e);
+            cancel_token.cancel();
+            return Err(error!("Failed to register discoverable service"));
         }
-        task.await??;
 
-        Ok(())
+        // 2. Start the service only after successful registration
+        let task = tokio::spawn(push_endpoint.start(service_endpoint));
+
+        // 3. Monitor the task and handle result
+        let task_result = match task.await {
+            Ok(Ok(())) => {
+                tracing::debug!("Endpoint service completed successfully");
+                Ok(())
+            }
+            Ok(Err(service_error)) => {
+                tracing::error!(
+                    error = %service_error,
+                    endpoint = %endpoint,
+                    "Service failed"
+                );
+                cancel_token.cancel();
+                Err(service_error)
+            }
+            Err(join_error) => {
+                tracing::error!(
+                    error = %join_error,
+                    endpoint = %endpoint,
+                    "Task join failed"
+                );
+                cancel_token.cancel();
+                Err(error!("Task failed to complete"))
+            }
+        };
+
+        // Always cleanup: remove from storage regardless of success/failure
+        if let Err(cleanup_error) = storage.delete(None).await {
+            tracing::warn!(
+                error = %cleanup_error,
+                endpoint = %endpoint,
+                action = "cleanup_service_registration",
+                "Failed to cleanup service registration"
+            );
+        }
+
+        task_result
     }
 }

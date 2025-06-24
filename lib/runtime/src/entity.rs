@@ -95,7 +95,39 @@ use crate::{
 };
 use crate::traits::{DistributedRuntimeProvider, RuntimeProvider};
 use std::fmt;
-use crate::discovery::DiscoveryClient;
+use crate::discovery::{DiscoveryClient, Storage};
+
+use crate::{discovery::Lease, service::ServiceSet, transports::etcd::EtcdPath};
+use super::{
+    error,
+    traits::*,
+    transports::nats::Slug,
+    utils::Duration,
+    Result, Runtime,
+};
+pub use client::{Client, InstanceSource};
+
+use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
+use crate::protocols::Endpoint as EndpointId;
+use async_nats::{
+    rustls::quic,
+    service::{Service, ServiceExt},
+};
+use derive_builder::Builder;
+use derive_getters::Getters;
+use educe::Educe;
+use serde::{Deserialize, Serialize};
+use service::EndpointStatsHandler;
+use std::{collections::HashMap, hash::Hash, sync::Arc};
+use validator::{Validate, ValidationError};
+
+mod client;
+#[allow(clippy::module_inception)]
+mod component;
+mod endpoint;
+mod namespace;
+mod registry;
+pub mod service;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EntityError {
@@ -113,15 +145,18 @@ pub trait ToEntity {
 }
 
 /// Operational namespace with distributed runtime
-#[derive(Clone)]
+#[derive(Clone, Educe)]
+#[educe(Debug)]
 pub struct Namespace {
     descriptor: Identifier,  // Always namespace-only
+
+    #[educe(Debug(ignore))]
     runtime: DistributedRuntime,
 }
 
 impl Namespace {
     pub fn from_descriptor(descriptor: Identifier, runtime: DistributedRuntime) -> Result<Self, EntityError> {
-        Ok(Self { descriptor, runtime })
+        Ok(Self { descriptor: descriptor.to_namespace(), runtime })
     }
 
     pub fn new(namespace: &str, runtime: DistributedRuntime) -> Result<Self, EntityError> {
@@ -194,9 +229,12 @@ impl DiscoveryClient for Namespace {
 }
 
 /// Operational component with distributed runtime
-#[derive(Clone)]
+#[derive(Clone, Educe)]
+#[educe(Debug)]
 pub struct Component {
     descriptor: Identifier,  // Must have component
+
+    #[educe(Debug(ignore))]
     runtime: DistributedRuntime,
 }
 
@@ -205,7 +243,7 @@ impl Component {
         if descriptor.component_name().is_none() {
             return Err(EntityError::InvalidDescriptor("Descriptor must have component"));
         }
-        Ok(Self { descriptor, runtime })
+        Ok(Self { descriptor: descriptor.to_component().unwrap(), runtime })
     }
 
     pub fn new(namespace: &str, component: &str, runtime: DistributedRuntime) -> Result<Self, EntityError> {
@@ -262,9 +300,12 @@ impl DiscoveryClient for Component {
 }
 
 /// Operational endpoint with distributed runtime
-#[derive(Clone)]
+#[derive(Clone, Educe)]
+#[educe(Debug)]
 pub struct Endpoint {
     descriptor: Instance,
+
+    #[educe(Debug(ignore))]
     runtime: DistributedRuntime,
 }
 
@@ -312,6 +353,25 @@ impl Endpoint {
         )?;
         Path::from_descriptor(keys, self.runtime.clone())
     }
+
+    pub async fn client(&self) -> Result<client::Client> {
+        client::Client::new(self.clone()).await
+    }
+
+    pub fn discovery_storage(&self) -> Result<Storage> {
+        let client = self.drt()
+            .etcd_client_internal()
+            .ok_or_else(|| anyhow::anyhow!("etcd client not available"))?;
+
+        Ok(Storage::new(
+            client,
+            self.to_descriptor().identifier().to_string(),
+        ))
+    }
+
+    pub fn endpoint_builder(&self) -> endpoint::EndpointConfigBuilder {
+        endpoint::EndpointConfigBuilder::from_endpoint(self.clone())
+    }
 }
 
 impl DistributedRuntimeProvider for Endpoint {
@@ -339,9 +399,12 @@ impl DiscoveryClient for Endpoint {
 }
 
 /// Operational path with extended segments and distributed runtime
-#[derive(Clone)]
+#[derive(Clone, Educe)]
+#[educe(Debug)]
 pub struct Path {
     descriptor: Keys,
+
+    #[educe(Debug(ignore))]
     runtime: DistributedRuntime,
 }
 
@@ -505,6 +568,17 @@ impl EntityChain for DistributedRuntime {
     fn endpoint(&self, namespace: &str, component: &str, endpoint: &str) -> Result<Endpoint, EntityError> {
         Endpoint::new(namespace, component, endpoint, self.clone())
     }
+}
+
+#[derive(Default)]
+pub struct RegistryInner {
+    services: HashMap<Identifier, Service>,
+    stats_handlers: HashMap<Identifier, Arc<std::sync::Mutex<HashMap<Slug, EndpointStatsHandler>>>>,
+}
+
+#[derive(Clone)]
+pub struct Registry {
+    inner: Arc<tokio::sync::Mutex<RegistryInner>>,
 }
 
 #[cfg(test)]

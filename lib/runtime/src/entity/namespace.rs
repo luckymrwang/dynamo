@@ -23,9 +23,9 @@ use super::*;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
-impl EventPublisher for Component {
+impl EventPublisher for Namespace {
     fn subject(&self) -> String {
-        format!("namespace.{}.component.{}", self.namespace.name, self.name)
+        self.to_descriptor().slug().to_string()
     }
 
     async fn publish(
@@ -53,7 +53,7 @@ impl EventPublisher for Component {
 }
 
 #[async_trait]
-impl EventSubscriber for Component {
+impl EventSubscriber for Namespace {
     async fn subscribe(
         &self,
         event_name: impl AsRef<str> + Send + Sync,
@@ -90,8 +90,7 @@ mod tests {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
         let ns = dtr.namespace("test".to_string()).unwrap();
-        let cp = ns.component("component".to_string()).unwrap();
-        cp.publish("test", &"test".to_string()).await.unwrap();
+        ns.publish("test", &"test".to_string()).await.unwrap();
         rt.shutdown();
     }
 
@@ -100,13 +99,12 @@ mod tests {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
         let ns = dtr.namespace("test".to_string()).unwrap();
-        let cp = ns.component("component".to_string()).unwrap();
 
         // Create a subscriber
         let mut subscriber = ns.subscribe("test").await.unwrap();
 
         // Publish a message
-        cp.publish("test", &"test_message".to_string())
+        ns.publish("test", &"test_message".to_string())
             .await
             .unwrap();
 

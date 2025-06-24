@@ -13,9 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-pub use crate::component::Component;
 use crate::{
-    component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
+    descriptor::{Instance, Identifier},
+    entity::{Component, Endpoint, Namespace, InstanceSource, Registry},
     discovery::DiscoveryClient,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
@@ -29,6 +29,7 @@ use figment::error;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
+
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
@@ -70,7 +71,7 @@ impl DistributedRuntime {
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            component_registry: component::Registry::new(),
+            component_registry: Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
         })
@@ -169,7 +170,7 @@ impl DistributedRuntime {
         self.runtime.child_token()
     }
 
-    pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
+    pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Identifier, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
     }
 }

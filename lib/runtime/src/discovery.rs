@@ -135,6 +135,10 @@ pub struct Storage<'a> {
 }
 
 impl<'a> Storage<'a> {
+
+    pub fn primary_lease(&self) -> Lease {
+        self.client.primary_lease()
+    }
     /// Create a new lease with specified TTL
     pub async fn create_lease(&self, ttl: i64) -> Result<Lease> {
         self.client.create_lease(ttl).await
@@ -193,6 +197,11 @@ impl<'a> Storage<'a> {
     /// Get the key this storage is scoped to
     pub fn key(&self) -> &str {
         &self.key
+    }
+
+    /// Public constructor so other modules can create a `Storage` scoped to a custom key.
+    pub fn new(client: &'a etcd::Client, key: String) -> Self {
+        Self { client, key }
     }
 }
 

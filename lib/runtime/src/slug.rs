@@ -21,13 +21,13 @@ const REPLACEMENT_CHAR: char = '_';
 
 /// URL and NATS friendly string.
 /// Only a-z, 0-9, - and _.
-#[derive(Serialize, Clone, Debug, Eq, PartialEq)]
+#[derive(Serialize, Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Slug(String);
 
 impl Slug {
     fn new(s: String) -> Slug {
         // remove any leading REPLACEMENT_CHAR
-        let s = s.trim_start_matches(REPLACEMENT_CHAR).to_string();
+        let s: String = s.trim_start_matches(REPLACEMENT_CHAR).to_string();
         Slug(s)
     }
 

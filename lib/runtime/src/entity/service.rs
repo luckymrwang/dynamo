@@ -18,6 +18,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use super::*;
+use crate::transports::nats::Slug;
 
 pub use super::endpoint::EndpointStats;
 pub type StatsHandler =
@@ -46,55 +47,50 @@ impl ServiceConfigBuilder {
 
         let version = "0.0.1".to_string();
 
-        let service_name = component.service_name();
-        log::debug!("component: {component}; creating, service_name: {service_name}");
+        // let service_name = component.service_name();
+        // log::debug!("component: {component}; creating, service_name: {service_name}");
 
         let description = description.unwrap_or(format!(
-            "{PROJECT_NAME} component {} in namespace {}",
-            component.name, component.namespace
-        ));
+            "{PROJECT_NAME} {component}"));
 
-        let stats_handler_registry: Arc<Mutex<HashMap<String, EndpointStatsHandler>>> =
+        let stats_handler_registry: Arc<Mutex<HashMap<Slug, EndpointStatsHandler>>> =
             Arc::new(Mutex::new(HashMap::new()));
 
         let stats_handler_registry_clone = stats_handler_registry.clone();
 
-        let mut guard = component.drt.component_registry.inner.lock().await;
+        let mut guard = component.drt().component_registry.inner.lock().await;
 
-        if guard.services.contains_key(&service_name) {
+        if guard.services.contains_key(&component.to_descriptor()) {
             return Err(anyhow::anyhow!("Service already exists"));
         }
 
         // create service on the secondary runtime
-        let builder = component.drt.nats_client.client().service_builder();
+        let builder = component.drt().nats_client.client().service_builder();
 
-        tracing::debug!("Starting service: {}", service_name);
+        tracing::debug!("Starting service: {}", component.to_descriptor().slug());
         let service_builder = builder
             .description(description)
-            .stats_handler(move |name, stats| {
+            .stats_handler(move |name: String, stats| {
                 log::trace!("stats_handler: {name}, {stats:?}");
                 let mut guard = stats_handler_registry.lock().unwrap();
-                match guard.get_mut(&name) {
+                match guard.get_mut(&Slug::slugify(&name)) {
                     Some(handler) => handler(stats),
                     None => serde_json::Value::Null,
                 }
             });
         tracing::debug!("Got builder");
         let service = service_builder
-            .start(service_name.clone(), version)
+            .start(component.to_descriptor().slug().to_string(), version)
             .await
             .map_err(|e| anyhow::anyhow!("Failed to start service: {e}"))?;
 
-        // new copy of service_name as the previous one is moved into the task above
-        let service_name = component.service_name();
-
         // insert the service into the registry
-        guard.services.insert(service_name.clone(), service);
+        guard.services.insert(component.to_descriptor(), service);
 
         // insert the stats handler into the registry
         guard
             .stats_handlers
-            .insert(service_name, stats_handler_registry_clone);
+            .insert(component.to_descriptor(), stats_handler_registry_clone);
 
         // drop the guard to unlock the mutex
         drop(guard);
