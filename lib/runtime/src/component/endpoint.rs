@@ -17,7 +17,10 @@ use derive_getters::Dissolve;
 
 use super::*;
 
-use axum::{extract::State, http::StatusCode, response::Json, routing::get, Router};
+use axum::{
+    extract::State, http::StatusCode, response::IntoResponse, response::Json, response::Response,
+    routing::get, Router,
+};
 use pyo3::{
     types::PyAny, types::PyAnyMethods, types::PyDict, types::PyTuple, DowncastError, FromPyObject,
     Py, PyErr, PyObject, Python,
@@ -214,6 +217,7 @@ impl EndpointConfigBuilder {
                                 drt.clear_http_management_service().await;
                             }
                             Err(e) => {
+                                tracing::error!("HTTP management service failed: {}", e);
                                 // Clear the service info on error
                                 drt.clear_http_management_service().await;
                             }
@@ -327,7 +331,7 @@ async fn start_http_service(
     Ok(actual_port)
 }
 
-async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<Value>, StatusCode> {
+async fn health_handler(State(info): State<HttpManagementInfo>) -> Response {
     let mut health_checks = json!({});
     let mut overall_healthy = true;
 
@@ -452,9 +456,9 @@ async fn health_handler(State(info): State<HttpManagementInfo>) -> Result<Json<V
 
     // Return different HTTP status codes based on overall health status
     if overall_healthy {
-        Ok(Json(health_status))
+        Json(health_status).into_response()
     } else {
-        Err(StatusCode::SERVICE_UNAVAILABLE)
+        (StatusCode::SERVICE_UNAVAILABLE, Json(health_status)).into_response()
     }
 }
 
