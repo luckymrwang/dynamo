@@ -27,7 +27,7 @@ pub struct Slug(String);
 impl Slug {
     fn new(s: String) -> Slug {
         // remove any leading REPLACEMENT_CHAR
-        let s: String = s.trim_start_matches(REPLACEMENT_CHAR).to_string();
+        let s = s.trim_start_matches(REPLACEMENT_CHAR).to_string();
         Slug(s)
     }
 

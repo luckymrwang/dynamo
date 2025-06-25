@@ -104,3 +104,68 @@ impl ServiceConfigBuilder {
         Self::default().component(component)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::entity::Component;
+    use crate::Runtime;
+
+    async fn create_test_runtime() -> DistributedRuntime {
+        let runtime = Runtime::from_current().unwrap();
+        DistributedRuntime::from_settings_without_discovery(runtime).await.unwrap()
+    }
+
+    async fn check_nats_available() -> bool {
+        // Try to connect to NATS to see if it's available
+        match async_nats::connect("nats://localhost:4222").await {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_service_creation_registers_service() {
+        // Check if NATS is available
+        if !check_nats_available().await {
+            eprintln!("Skipping test: NATS not available");
+            return;
+        }
+
+        let drt = create_test_runtime().await;
+        let component = Component::new("test", "svc", drt).unwrap();
+        let builder = ServiceConfigBuilder::from_component(component.clone());
+        let created_component = builder.create().await.expect("Service should be created");
+
+        // Check that the service is in the registry
+        let registry = created_component.drt().component_registry.inner.lock().await;
+        assert!(registry.services.contains_key(&created_component.to_descriptor()));
+
+        // Also check that stats handler registry was created
+        assert!(registry.stats_handlers.contains_key(&created_component.to_descriptor()));
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_service_creation_fails() {
+        // Check if NATS is available
+        if !check_nats_available().await {
+            eprintln!("Skipping test: NATS not available");
+            return;
+        }
+
+        let drt = create_test_runtime().await;
+        let component = Component::new("test", "svc", drt).unwrap();
+        let builder = ServiceConfigBuilder::from_component(component.clone());
+        builder.create().await.expect("First creation should succeed");
+
+        // Second creation should fail
+        let builder2 = ServiceConfigBuilder::from_component(component.clone());
+        let result = builder2.create().await;
+        assert!(result.is_err(), "Duplicate service creation should fail");
+
+        // Verify the error message contains expected text
+        if let Err(e) = result {
+            assert!(e.to_string().contains("Service already exists"));
+        }
+    }
+}

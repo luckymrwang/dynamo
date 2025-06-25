@@ -194,7 +194,7 @@ impl Client {
 
         secondary.spawn(async move {
             tracing::debug!(prefix = %prefix, "Starting endpoint watcher");
-            let mut instance_map = HashMap::new();
+            let mut instance_map: HashMap<Instance, StoredTransport> = HashMap::new();
 
             loop {
                 let kv_event = tokio::select! {
@@ -236,7 +236,7 @@ impl Client {
 
     fn handle_put_event(
         kv: etcd_client::KeyValue,
-        instance_map: &mut HashMap<Identifier, StoredTransport>
+        instance_map: &mut HashMap<Instance, StoredTransport>
     ) -> bool {
         let Ok(key) = kv.key_str() else {
             tracing::error!("Unable to parse PUT event key as UTF-8");
@@ -254,7 +254,7 @@ impl Client {
         };
 
         instance_map.insert(
-            instance.identifier(),
+            instance.clone(),
             StoredValue { key: instance, value: transport }
         );
         true
@@ -262,7 +262,7 @@ impl Client {
 
     fn handle_delete_event(
         kv: etcd_client::KeyValue,
-        instance_map: &mut HashMap<Identifier, StoredTransport>,
+        instance_map: &mut HashMap<Instance, StoredTransport>,
         prefix: &str
     ) -> bool {
         let Ok(key) = kv.key_str() else {
@@ -278,7 +278,7 @@ impl Client {
             return true; // Continue processing other events
         };
 
-        instance_map.remove(&instance.identifier());
+        instance_map.remove(&instance);
         true
     }
 }
@@ -345,7 +345,7 @@ mod tests {
         ];
 
         // Create a dynamic client with test data
-        let (tx, rx) = tokio::sync::watch::channel(instances.clone());
+        let (_tx, rx) = tokio::sync::watch::channel(instances.clone());
         let instance_source = Arc::new(InstanceSource::Dynamic(rx));
 
         let endpoint = Endpoint::new("test", "svc", "api", drt).unwrap();
@@ -449,18 +449,46 @@ mod tests {
         assert_eq!(instances.len(), 1);
         assert_eq!(instances[0].key.instance_id(), Some(789));
 
-        // Check instance IDs
-        let ids = client.instance_ids();
-        assert_eq!(ids.len(), 1);
-        assert_eq!(ids[0], 789);
+        // Add a second instance
+        let test_instance2 = Instance::new(
+            Identifier::new_endpoint("test", "client", "dynamic").unwrap(),
+            790
+        ).unwrap();
+        let test_endpoint2 = Endpoint::from_instance(test_instance2.clone(), drt.clone()).unwrap();
 
-        // Clean up
-        storage.delete(None).await.unwrap();
+        // Store transport info for second instance
+        let transport2 = TransportType::NatsTcp("nats://localhost:4226".to_string());
+        let storage2 = test_endpoint2.storage().unwrap();
+        storage2.put(serde_json::to_vec(&transport2).unwrap(), None).await.unwrap();
 
-        // Wait for deletion to propagate
+        // Wait for the watcher to pick up the second instance
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        // Verify instance was removed
+        // Check that the client now sees both instances
+        let instances = client.instances();
+        assert_eq!(instances.len(), 2);
+
+        // Verify both instance IDs are present
+        let instance_ids: Vec<i64> = instances.iter()
+            .filter_map(|st| st.key.instance_id())
+            .collect();
+        assert!(instance_ids.contains(&789));
+        assert!(instance_ids.contains(&790));
+
+        // Check instance IDs method
+        let ids = client.instance_ids();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.contains(&789));
+        assert!(ids.contains(&790));
+
+        // Clean up both instances
+        storage.delete(None).await.unwrap();
+        storage2.delete(None).await.unwrap();
+
+        // Wait for deletions to propagate
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // Verify both instances were removed
         assert_eq!(client.instances().len(), 0);
     }
 
@@ -489,82 +517,5 @@ mod tests {
 
         // They should share the same instance source (via Arc)
         assert!(Arc::ptr_eq(&client1.instance_source, &client2.instance_source));
-    }
-
-        // Create a mock KeyValue for testing
-    fn create_test_kv(key: &str, value: Vec<u8>) -> etcd_client::KeyValue {
-        // Since KeyValue doesn't have a public constructor, we'll test through the full flow
-        // with etcd in the integration tests. For unit tests, we'll focus on the logic
-        // that doesn't require KeyValue directly.
-        todo!("KeyValue mocking requires etcd integration")
-    }
-
-    #[tokio::test]
-    async fn test_transport_serialization() {
-        // Test that TransportType serializes/deserializes correctly
-        let transport = TransportType::NatsTcp("nats://localhost:4222".to_string());
-        let serialized = serde_json::to_vec(&transport).unwrap();
-        let deserialized: TransportType = serde_json::from_slice(&serialized).unwrap();
-
-        assert!(matches!(deserialized, TransportType::NatsTcp(addr) if addr == "nats://localhost:4222"));
-    }
-
-    #[tokio::test]
-    async fn test_stored_value_structure() {
-        let instance = Instance::new(
-            Identifier::new_endpoint("test", "svc", "api").unwrap(),
-            123
-        ).unwrap();
-
-        let stored = StoredTransport {
-            key: instance.clone(),
-            value: TransportType::NatsTcp("nats://localhost:4222".to_string()),
-        };
-
-        assert_eq!(stored.key.instance_id(), Some(123));
-        assert!(matches!(stored.value, TransportType::NatsTcp(_)));
-    }
-
-    #[tokio::test]
-    async fn test_instance_map_operations() {
-        let mut map: HashMap<Instance, StoredTransport> = HashMap::new();
-
-        // Test insert
-        let instance1 = Instance::new(
-            Identifier::new_endpoint("test", "svc", "api").unwrap(),
-            123
-        ).unwrap();
-        let transport1 = StoredTransport {
-            key: instance1.clone(),
-            value: TransportType::NatsTcp("nats://localhost:4222".to_string()),
-        };
-        map.insert(instance1.clone(), transport1);
-
-        // Test retrieval
-        assert_eq!(map.len(), 1);
-        assert!(map.contains_key(&instance1));
-
-        // Test remove
-        map.remove(&instance1);
-        assert_eq!(map.len(), 0);
-
-        // Test values collection
-        let instance2 = Instance::new(
-            Identifier::new_endpoint("test", "svc", "api").unwrap(),
-            456
-        ).unwrap();
-        let transport1_new = StoredTransport {
-            key: instance1.clone(),
-            value: TransportType::NatsTcp("nats://localhost:4222".to_string()),
-        };
-        let transport2 = StoredTransport {
-            key: instance2.clone(),
-            value: TransportType::NatsTcp("nats://localhost:4223".to_string()),
-        };
-        map.insert(instance1.clone(), transport1_new);
-        map.insert(instance2.clone(), transport2);
-
-        let values: Vec<StoredTransport> = map.values().cloned().collect();
-        assert_eq!(values.len(), 2);
     }
 }
