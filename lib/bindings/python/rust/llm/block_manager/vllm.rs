@@ -11,13 +11,15 @@ use pyo3::{prelude::*, wrap_pymodule};
 
 use dynamo_llm::{
     block_manager::{
-        block::{BlockId, BlockIdentifier, ImmutableBlock, MutableBlock},
+        block::locality::{Local, LocalityProvider},
+        block::{BlockId, ImmutableBlock, MutableBlock},
         pool::BlockPool,
         BasicMetadata, DeviceStorage, KvBlockManager, Storage,
     },
     tokens::{SaltHash, SequenceHash, TokenBlockSequence, Tokens},
 };
 
+// use crate::llm::block_manager::BlockManager as PyBlockManager;
 use crate::llm::block_manager::BlockManager as PyBlockManager;
 
 use crate::to_pyerr;
@@ -284,7 +286,7 @@ impl SlotError {
 }
 
 pub struct SlotManager<R: RequestKey> {
-    slots: HashMap<R, Slot<DeviceStorage>>,
+    slots: HashMap<R, Slot<DeviceStorage, Local>>,
     block_size: usize,
 }
 

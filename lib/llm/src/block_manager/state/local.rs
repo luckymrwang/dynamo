@@ -95,6 +95,7 @@ fn create_layout<S: Storage + NixlRegisterableStorage>(
     nixl_agent: Option<&NixlAgent>,
 ) -> Result<Arc<dyn NixlLayout<StorageType = S>>> {
     let layout = builder.num_blocks(config.num_blocks).build()?;
+
     if let Some(_logical) = config.logical {
         return Err(anyhow::anyhow!(
             "Logical layouts are not supported by the local builder"
@@ -102,7 +103,7 @@ fn create_layout<S: Storage + NixlRegisterableStorage>(
     }
 
     if let Some(storage) = config.storage {
-        let mut layout = layout.create_layout(config.layout_type, storage, true)?;
+        let mut layout = layout.create_layout(config.layout_type, storage)?;
         if let Some(nixl_agent) = nixl_agent {
             layout.nixl_register(nixl_agent, None)?;
         }
