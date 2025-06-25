@@ -536,8 +536,7 @@ pub mod tests {
 
     use crate::block_manager::{
         block::{
-            locality::Local, BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, Blocks,
-            MutableBlock,
+            locality::Local, BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock,
         },
         layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
         pool::BlockPool,
@@ -602,17 +601,19 @@ pub mod tests {
         }
     }
 
+    type PoolResult = Result<(
+        Arc<OffloadManager<Local, BasicMetadata>>,
+        DevicePool,
+        HostPool,
+        DiskPool,
+    )>;
+
     fn build_pools(
         device_blocks: usize,
         host_blocks: Option<usize>,
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
-    ) -> Result<(
-        Arc<OffloadManager<Local, BasicMetadata>>,
-        DevicePool,
-        HostPool,
-        DiskPool,
-    )> {
+    ) -> PoolResult {
         build_pools_with_layout(
             device_blocks,
             host_blocks,
@@ -628,12 +629,7 @@ pub mod tests {
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
         layout_type: LayoutType,
-    ) -> Result<(
-        Arc<OffloadManager<Local, BasicMetadata>>,
-        DevicePool,
-        HostPool,
-        DiskPool,
-    )> {
+    ) -> PoolResult {
         let mut config = LayoutConfig {
             num_blocks: device_blocks,
             num_layers: NUM_LAYERS,
@@ -686,14 +682,6 @@ pub mod tests {
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))
-    }
-
-    /// Create a block in the 'RESET' state.
-    async fn get_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &Arc<BlockPool<S, Local, Metadata>>,
-    ) -> Result<MutableBlock<S, Local, Metadata>> {
-        let mut blocks = pool.allocate_blocks(1).await?;
-        Ok(blocks.pop().unwrap())
     }
 
     /// Create a block in the 'COMPLETED' state.

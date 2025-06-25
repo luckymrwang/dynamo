@@ -343,7 +343,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
     /// # Arguments
     ///
     /// * `blocks` - A [`Vec<Block<S, M>>`] to add to the inactive pool.
-    #[expect(dead_code)]
     pub(crate) async fn add_blocks(
         &self,
         blocks: Vec<Block<S, L, M>>,
@@ -354,6 +353,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
     }
 
     /// Blocking version of [`BlockPool::add_blocks`].
+    #[expect(dead_code)]
     pub(crate) fn add_blocks_blocking(
         &self,
         blocks: Vec<Block<S, L, M>>,
@@ -540,11 +540,12 @@ mod tests {
 
     use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
 
+    type ProgressEngineBuildResult<S, L, M> =
+        anyhow::Result<(BlockPool<S, L, M>, ProgressEngine<S, L, M>)>;
+
     /// Helper method to build a [`BlockPool`] with a [`ProgressEngine`] for unit testing
     impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolArgsBuilder<S, L, M> {
-        fn build_with_progress_engine(
-            self,
-        ) -> anyhow::Result<(BlockPool<S, L, M>, ProgressEngine<S, L, M>)> {
+        fn build_with_progress_engine(self) -> ProgressEngineBuildResult<S, L, M> {
             let args = self.build_internal()?;
             let (event_manager, cancel_token, blocks, global_registry, async_runtime, metrics) =
                 args.dissolve();
