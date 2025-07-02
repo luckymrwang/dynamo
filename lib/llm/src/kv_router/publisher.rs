@@ -21,7 +21,7 @@ use crate::kv_router::{
 use async_trait::async_trait;
 use dynamo_runtime::traits::{events::EventPublisher, DistributedRuntimeProvider};
 use dynamo_runtime::{
-    component::Component,
+    entity::Component,
     pipeline::{
         network::Ingress, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream,
         SingleIn,
@@ -485,7 +485,7 @@ impl WorkerMetricsPublisher {
         let handler = Ingress::for_engine(handler)?;
 
         component
-            .endpoint(KV_METRICS_ENDPOINT)
+            .endpoint(KV_METRICS_ENDPOINT)?
             .endpoint_builder()
             .stats_handler(move |_| {
                 let metrics = metrics_rx.borrow_and_update().clone();

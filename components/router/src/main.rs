@@ -32,6 +32,7 @@ use dynamo_llm::kv_router::{
 };
 use dynamo_runtime::{
     logging, pipeline::network::Ingress, DistributedRuntime, Result, Runtime, Worker,
+    entity::EntityChain
 };
 
 #[derive(Parser)]
@@ -73,7 +74,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .service_builder()
         .create()
         .await?
-        .endpoint("generate")
+        .endpoint("generate")?
         .endpoint_builder()
         .handler(router)
         .start()

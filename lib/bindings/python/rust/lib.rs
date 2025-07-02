@@ -17,6 +17,7 @@ use dynamo_runtime::{
     pipeline::{EngineStream, ManyOut, SingleIn},
     protocols::annotated::Annotated as RsAnnotated,
     traits::DistributedRuntimeProvider,
+    entity::EntityChain
 };
 
 use dynamo_llm::{self as llm_rs};
@@ -164,21 +165,21 @@ struct CancellationToken {
 #[pyclass]
 #[derive(Clone)]
 struct Namespace {
-    inner: rs::component::Namespace,
+    inner: rs::entity::Namespace,
     event_loop: PyObject,
 }
 
 #[pyclass]
 #[derive(Clone)]
 struct Component {
-    inner: rs::component::Component,
+    inner: rs::entity::Component,
     event_loop: PyObject,
 }
 
 #[pyclass]
 #[derive(Clone)]
 struct Endpoint {
-    inner: rs::component::Endpoint,
+    inner: rs::entity::Endpoint,
     event_loop: PyObject,
 }
 
@@ -230,7 +231,7 @@ impl DistributedRuntime {
 
     fn namespace(&self, name: String) -> PyResult<Namespace> {
         Ok(Namespace {
-            inner: self.inner.namespace(name).map_err(to_pyerr)?,
+            inner: self.inner.namespace(&name).map_err(to_pyerr)?,
             event_loop: self.event_loop.clone(),
         })
     }
@@ -416,7 +417,7 @@ impl CancellationToken {
 #[pymethods]
 impl Component {
     fn endpoint(&self, name: String) -> PyResult<Endpoint> {
-        let inner = self.inner.endpoint(name);
+        let inner = self.inner.endpoint(&name).map_err(to_pyerr)?;
         Ok(Endpoint {
             inner,
             event_loop: self.event_loop.clone(),
@@ -481,7 +482,7 @@ impl Endpoint {
 #[pymethods]
 impl Namespace {
     fn component(&self, name: String) -> PyResult<Component> {
-        let inner = self.inner.component(name).map_err(to_pyerr)?;
+        let inner = self.inner.component(&name).map_err(to_pyerr)?;
         Ok(Component {
             inner,
             event_loop: self.event_loop.clone(),
@@ -598,11 +599,13 @@ impl Client {
     /// Replaces wait_for_endpoints.
     fn wait_for_instances<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let inner = self.router.client.clone();
+
+        // Safety: We don't expose static, so instance_id will exist
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             inner
                 .wait_for_instances()
                 .await
-                .map(|v| v.into_iter().map(|cei| cei.id()).collect::<Vec<i64>>())
+                .map(|v| v.into_iter().map(|cei| cei.instance_id().unwrap()).collect::<Vec<i64>>())
                 .map_err(to_pyerr)
         })
     }

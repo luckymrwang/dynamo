@@ -15,6 +15,7 @@ use dynamo_runtime::{
     transports::etcd::{KeyValue, WatchEvent},
     DistributedRuntime,
 };
+use dynamo_runtime::entity::{EntityChain, ToEntity};
 
 use crate::{
     backend::Backend,
@@ -160,12 +161,15 @@ impl ModelWatcher {
     // Handles a PUT event from etcd, this usually means adding a new model to the list of served
     // models.
     async fn handle_put(&self, model_entry: &ModelEntry) -> anyhow::Result<()> {
-        let endpoint_id = model_entry.endpoint.clone();
-        let component = self
-            .drt
-            .namespace(&endpoint_id.namespace)?
-            .component(&endpoint_id.component)?;
-        let client = component.endpoint(&endpoint_id.name).client().await?;
+        let instance = model_entry.instance.clone();
+        let endpoint = instance.to_entity(self.drt.clone())?;
+        let component = endpoint.component();
+        let client = endpoint.client().await?;
+        // let component = self
+        //     .drt
+        //     .namespace(&endpoint_id.namespace)?
+        //     .component(&endpoint_id.component)?;
+        // let client = component.endpoint(&endpoint_id.name).client().await?;
 
         let Some(etcd_client) = self.drt.etcd_client() else {
             // Should be impossible because we only get here on an etcd event

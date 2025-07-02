@@ -17,12 +17,12 @@ use dynamo_llm::kv_router::{
     protocols::ForwardPassMetrics, scheduler::KVHitRateEvent, KV_HIT_RATE_SUBJECT,
 };
 use dynamo_runtime::{
-    component::{service::EndpointStats, Namespace},
     logging,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
         ResponseStream, SingleIn,
     },
+    entity::{EntityChain, service::EndpointStats, Namespace},
     protocols::annotated::Annotated,
     stream,
     traits::events::EventPublisher,
@@ -136,8 +136,8 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
         .service_builder()
         .create()
         .await?;
-    let endpoint = component.endpoint("my_endpoint");
-    tracing::info!("Starting Mock Worker on Endpoint: {}", endpoint.path());
+    let endpoint = component.endpoint("my_endpoint")?;
+    tracing::info!("Starting Mock Worker on Endpoint: {}", endpoint);
 
     // Spawn background task for publishing KV hit rate events
     let namespace_clone = namespace.clone();

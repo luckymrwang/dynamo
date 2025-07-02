@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use dynamo_runtime::component::Namespace;
+use dynamo_runtime::entity::Namespace;
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};

@@ -64,7 +64,7 @@ async fn health_handler(
     } else {
         let endpoints: Vec<String> = model_entries
             .iter()
-            .map(|entry| entry.endpoint.as_url())
+            .map(|entry| entry.instance.to_string())
             .collect();
         (
             StatusCode::OK,

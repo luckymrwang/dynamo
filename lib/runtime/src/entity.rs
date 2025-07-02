@@ -108,7 +108,6 @@ use super::{
 pub use client::{Client, InstanceSource};
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
-use crate::protocols::Endpoint as EndpointId;
 use async_nats::{
     rustls::quic,
     service::{Service, ServiceExt},
@@ -265,6 +264,15 @@ impl Component {
         )
     }
 
+    /// Get the parent namespace of this component
+    /// This is guaranteed to succeed since a component must have a namespace
+    pub fn namespace(&self) -> Namespace {
+        let namespace_id = self.descriptor.to_namespace();
+
+        Namespace::from_descriptor(namespace_id, self.runtime.clone())
+            .expect("Valid namespace identifier") // Safe since to_namespace() always returns valid
+    }
+
     /// Chain to create a path
     pub fn path(&self, segments: &[&str]) -> Result<Path, EntityError> {
         let keys = Keys::from_identifier(
@@ -272,6 +280,18 @@ impl Component {
             segments.iter().map(|s| s.to_string()).collect()
         )?;
         Path::from_descriptor(keys, self.runtime.clone())
+    }
+
+    pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
+        let service_name = self.to_descriptor().slug().to_string();
+        let service_client = self.drt().service_client();
+        service_client
+            .collect_services(&service_name, timeout)
+            .await
+    }
+
+    pub fn service_builder(&self) -> service::ServiceConfigBuilder {
+        service::ServiceConfigBuilder::from_component(self.clone())
     }
 }
 
@@ -352,6 +372,25 @@ impl Endpoint {
             segments.iter().map(|s| s.to_string()).collect()
         )?;
         Path::from_descriptor(keys, self.runtime.clone())
+    }
+
+    /// Get the parent component of this endpoint
+    /// This is guaranteed to succeed since an endpoint must have a component
+    pub fn component(&self) -> Component {
+        let component_id = self.descriptor.identifier().to_component()
+            .expect("Endpoint must have a component"); // Safe since endpoint requires component
+
+        Component::from_descriptor(component_id, self.runtime.clone())
+            .expect("Valid component identifier") // Safe since we got it from to_component()
+    }
+
+    /// Get the namespace of this endpoint
+    /// This is guaranteed to succeed since an endpoint must have a namespace
+    pub fn namespace(&self) -> Namespace {
+        let namespace_id = self.descriptor.identifier().to_namespace();
+
+        Namespace::from_descriptor(namespace_id, self.runtime.clone())
+            .expect("Valid namespace identifier") // Safe since to_namespace() always returns valid
     }
 
     pub async fn client(&self) -> Result<client::Client> {
@@ -725,6 +764,20 @@ mod tests {
             .endpoint("http").unwrap()
             .path(&["v1", "config"]).unwrap();
         assert_eq!(path.to_string(), "dynamo://production/_component_/gateway/_endpoint_/http/_static_/_path_/v1/config");
+
+        // Test backward navigation: endpoint to component
+        let ep = drt.endpoint("production", "gateway", "http").unwrap();
+        let comp_from_ep = ep.component();
+        assert_eq!(comp_from_ep.to_string(), "dynamo://production/_component_/gateway");
+
+        // Test backward navigation: endpoint to namespace
+        let ns_from_ep = ep.namespace();
+        assert_eq!(ns_from_ep.to_string(), "dynamo://production");
+
+        // Test backward navigation: component to namespace
+        let comp = drt.component("production", "gateway").unwrap();
+        let ns_from_comp = comp.namespace();
+        assert_eq!(ns_from_comp.to_string(), "dynamo://production");
     }
 
     #[tokio::test]

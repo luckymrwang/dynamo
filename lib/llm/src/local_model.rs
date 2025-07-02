@@ -7,16 +7,18 @@ use std::sync::Arc;
 
 use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::{
-    component::{Component, Endpoint},
+    entity::{Component, Endpoint, ToEntity},
     storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
 };
+use dynamo_runtime::discovery::DiscoveryClient;
+use anyhow::Context;
 
 use crate::discovery::ModelEntry;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 
 mod network_name;
-pub use network_name::ModelNetworkName;
+use dynamo_runtime::descriptor::Instance;
 
 /// Prefix for Hugging Face model repository
 const HF_SCHEME: &str = "hf://";
@@ -143,10 +145,13 @@ impl LocalModel {
         model_type: ModelType,
     ) -> anyhow::Result<()> {
         // A static component doesn't have an etcd_client because it doesn't need to register
-        let Some(etcd_client) = endpoint.drt().etcd_client() else {
+        if endpoint.to_descriptor().is_static() {
             anyhow::bail!("Cannot attach to static endpoint");
-        };
-        self.ensure_unique(endpoint.component(), self.display_name())
+        }
+
+        let storage = endpoint.storage()?;
+
+        self.ensure_unique(&endpoint.component(), self.display_name())
             .await?;
 
         // Store model config files in NATS object store
@@ -154,7 +159,9 @@ impl LocalModel {
         self.card.move_to_nats(nats_client.clone()).await?;
 
         // Publish the Model Deployment Card to etcd
-        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
+        // TODO Figure out how to work this into the new ETCD storage method
+        // Using deprecated etcd_client() method now
+        let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(endpoint.drt().etcd_client().unwrap()));
         let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
         let key = self.card.slug().to_string();
         card_store
@@ -163,16 +170,14 @@ impl LocalModel {
 
         // Publish our ModelEntry to etcd. This allows ingress to find the model card.
         // (Why don't we put the model card directly under this key?)
-        let network_name = ModelNetworkName::from_local(endpoint, etcd_client.lease_id());
-        tracing::debug!("Registering with etcd as {network_name}");
+        tracing::debug!("Registering with etcd as {endpoint}");
         let model_registration = ModelEntry {
             name: self.display_name().to_string(),
-            endpoint: endpoint.id(),
+            instance: endpoint.to_descriptor(),
             model_type,
         };
-        etcd_client
-            .kv_create(
-                network_name.to_string(),
+        storage
+            .create(
                 serde_json::to_vec_pretty(&model_registration)?,
                 None, // use primary lease
             )
@@ -186,19 +191,47 @@ impl LocalModel {
     ///
     /// Returns an error if there is already a component by this name serving a different model.
     async fn ensure_unique(&self, component: &Component, model_name: &str) -> anyhow::Result<()> {
-        let Some(etcd_client) = component.drt().etcd_client() else {
+        let Ok(storage) = component.storage() else {
             // A static component is necessarily unique, it cannot register
             return Ok(());
         };
-        for endpoint_info in component.list_instances().await? {
-            let network_name: ModelNetworkName = (&endpoint_info).into();
 
-            if let Ok(entry) = network_name.load_entry(&etcd_client).await {
-                if entry.name != model_name {
-                    anyhow::bail!("Duplicate component. Attempt to register model {model_name} at {component}, which is already used by {network_name} running model {}.", entry.name);
-                }
+        for subpath in  storage.get_prefix().await? {
+            let Some(instance) = std::str::from_utf8(subpath.key())
+                .ok()
+                .and_then(|s| Instance::parse(s).ok()) else {
+                    continue;
+                };
+
+            // ModelEntry written under Endpoint. Parse Instance then turn into Endpoint
+            let mut model_entries = instance.clone().to_entity(component.drt().clone())?.storage()?.get().await?;
+            if model_entries.is_empty() {
+                anyhow::bail!("No ModelEntry in etcd for key {instance}");
+            }
+            let model_entry = model_entries.remove(0);
+            let entry : ModelEntry = serde_json::from_slice(model_entry.value()).with_context(|| {
+                format!(
+                    "Error deserializing JSON. Key={instance}. JSON={}",
+                    model_entry.value_str().unwrap_or("INVALID UTF-8")
+                )
+            })?;
+
+            if entry.name != model_name {
+                anyhow::bail!("Duplicate component. Attempt to register model {model_name} at {component}, which is already used by {instance} running model {}.", entry.name);
             }
         }
+
         Ok(())
+
+        // for endpoint_info in component.list_instances().await? {
+        //     let network_name: ModelNetworkName = (&endpoint_info).into();
+
+        //     if let Ok(entry) = network_name.load_entry(&etcd_client).await {
+        //         if entry.name != model_name {
+        //             anyhow::bail!("Duplicate component. Attempt to register model {model_name} at {component}, which is already used by {network_name} running model {}.", entry.name);
+        //         }
+        //     }
+        // }
+        // Ok(())
     }
 }

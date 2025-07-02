@@ -31,7 +31,7 @@ use dynamo_runtime::engine::AsyncEngineStream;
 use dynamo_runtime::pipeline::{
     network::Ingress, Context, ManyOut, Operator, SegmentSource, ServiceBackend, SingleIn, Source,
 };
-use dynamo_runtime::{protocols::Endpoint as EndpointId, DistributedRuntime};
+use dynamo_runtime::{protocols::Endpoint as EndpointId, DistributedRuntime, entity::EntityChain};
 
 use crate::EngineConfig;
 
@@ -50,7 +50,7 @@ pub async fn run(
         .service_builder()
         .create()
         .await?
-        .endpoint(&endpoint_id.name);
+        .endpoint(&endpoint_id.name)?;
 
     let (rt_fut, card): (Pin<Box<dyn Future<Output = _> + Send + 'static>>, _) = match engine_config
     {

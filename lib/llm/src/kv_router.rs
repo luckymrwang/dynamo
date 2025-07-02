@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use dynamo_runtime::{
-    component::{Component, InstanceSource},
+    entity::{Component, InstanceSource},
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut, PushRouter,
         ResponseStream, SingleIn,

@@ -88,7 +88,7 @@ use dynamo_llm::kv_router::scheduler::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
 use dynamo_runtime::{
-    distributed::Component, error, service::EndpointInfo, utils::Duration, Result,
+    error, service::EndpointInfo, utils::Duration, Result, entity::Component
 };
 
 /// Configuration for metrics collection mode

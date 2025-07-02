@@ -81,7 +81,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::slug::Slug;
 
-pub const ETCD_ROOT_PATH: &str = "dynamo://";
+// TODO Make DYN_ROOT_PATH part of Identifier tied to distributedRuntime
+pub const DYN_ROOT_PATH: &str = "dyn";
 pub const COMPONENT_KEYWORD: &str = "_component_";
 pub const ENDPOINT_KEYWORD: &str = "_endpoint_";
 pub const PATH_KEYWORD: &str = "_path_";
@@ -91,7 +92,7 @@ pub const STATIC_KEYWORD: &str = "_static_";
 /// Errors that can occur during descriptor operations
 #[derive(Debug, thiserror::Error)]
 pub enum DescriptorError {
-    #[error("Path must start with '{}'", ETCD_ROOT_PATH)]
+    #[error("Path must start with '{}'", DYN_ROOT_PATH)]
     InvalidPrefix,
     #[error("Invalid namespace: {0}")]
     InvalidNamespace(String),
@@ -132,12 +133,12 @@ impl DynamoPath {
     /// Parse any dynamo:// path into intermediate representation
     fn parse(input: &str) -> Result<Self, DescriptorError> {
         // Check for required prefix
-        if !input.starts_with(ETCD_ROOT_PATH) {
+        if !input.starts_with(DYN_ROOT_PATH) {
             return Err(DescriptorError::InvalidPrefix);
         }
 
         // Remove prefix and split into segments
-        let path_without_prefix = &input[ETCD_ROOT_PATH.len()..];
+        let path_without_prefix = &input[DYN_ROOT_PATH.len()..];
         let segments: Vec<&str> = path_without_prefix.split('/').collect();
 
         if segments.is_empty() || segments[0].is_empty() {
@@ -311,7 +312,7 @@ impl DynamoPath {
 
 /// Pure data descriptor for component identification
 /// Owns the canonical path format and validation logic
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub struct Identifier {
     namespace: String,
     component: Option<String>,
@@ -389,7 +390,7 @@ impl Identifier {
 
     /// Generate a slugified subject string for event publishing
     pub fn slug(&self) -> Slug {
-        Slug::slugify_unique(&self.to_string())
+        Slug::slugify(&self.to_string())
     }
 
     /// Create a namespace-only identifier from this identifier
@@ -415,7 +416,7 @@ impl std::fmt::Display for Identifier {
     /// Builds the canonical string representation in the format:
     /// dynamo://namespace[/_component_/component][/_endpoint_/endpoint]
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}", ETCD_ROOT_PATH, self.namespace)?;
+        write!(f, "{}/{}", DYN_ROOT_PATH, self.namespace)?;
 
         if let Some(ref component) = self.component {
             write!(f, "/{}/{}", COMPONENT_KEYWORD, component)?;
@@ -514,7 +515,7 @@ impl Instance {
 
     /// Generate a slugified subject string for event publishing
     pub fn slug(&self) -> Slug {
-        Slug::slugify_unique(&self.to_string())
+        Slug::slugify(&self.to_string())
     }
 }
 
@@ -523,7 +524,7 @@ impl std::fmt::Display for Instance {
     /// dynamo://namespace/_component_/component/_endpoint_/endpoint:hex_id
     /// The instance_id is formatted as lowercase hexadecimal after the endpoint
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}{}", ETCD_ROOT_PATH, self.identifier.namespace)?;
+        write!(f, "{}/{}", DYN_ROOT_PATH, self.identifier.namespace)?;
 
         if let Some(ref component) = self.identifier.component {
             write!(f, "/{}/{}", COMPONENT_KEYWORD, component)?;

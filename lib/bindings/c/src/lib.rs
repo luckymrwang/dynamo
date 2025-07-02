@@ -22,6 +22,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use dynamo_llm::kv_router::{
     indexer::compute_block_hash_for_seq, protocols::*, publisher::KvEventPublisher,
 };
+use dynamo_runtime::entity::EntityChain;
 use dynamo_runtime::{DistributedRuntime, Worker};
 static WK: OnceCell<Worker> = OnceCell::new();
 static DRT: AsyncOnceCell<DistributedRuntime> = AsyncOnceCell::new();
@@ -147,7 +148,7 @@ fn dynamo_create_kv_publisher(
         .ok_or(anyhow::Error::msg("Could not get Distributed Runtime"))
     {
         Ok(drt) => {
-            let backend = drt.namespace(namespace)?.component(component)?;
+            let backend = drt.namespace(&namespace)?.component(&component)?;
             KvEventPublisher::new(backend, worker_id, kv_block_size, None)
         }
         Err(e) => Err(e),

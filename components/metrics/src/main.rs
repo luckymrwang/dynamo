@@ -30,6 +30,7 @@ use clap::Parser;
 use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynamo_llm::kv_router::KV_HIT_RATE_SUBJECT;
 use dynamo_runtime::{
+    entity::EntityChain,
     error, logging,
     traits::events::{EventPublisher, EventSubscriber},
     utils::{Duration, Instant},
@@ -119,11 +120,11 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
-    let namespace = drt.namespace(args.namespace)?;
+    let namespace = drt.namespace(&args.namespace)?;
     let component = namespace.component("count")?;
 
     // Create unique instance of Count
-    let key = format!("{}/instance", component.etcd_root());
+    let key = format!("{}/instance", component);
     tracing::debug!("Creating unique instance of Count at {key}");
     drt.etcd_client()
         .expect("Unreachable because of DistributedRuntime::from_settings above")
@@ -132,11 +133,11 @@ async fn app(runtime: Runtime) -> Result<()> {
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 
     let target_component = namespace.component(&config.component_name)?;
-    let target_endpoint = target_component.endpoint(&config.endpoint_name);
+    let target_endpoint = target_component.endpoint(&config.endpoint_name)?;
 
-    let service_path = target_endpoint.path();
-    let service_subject = target_endpoint.subject();
-    tracing::info!("Scraping endpoint {service_path} for stats");
+    // let service_path = target_endpoint.path();
+    let service_subject = target_endpoint.to_descriptor().identifier().slug().to_string();
+    tracing::info!("Scraping endpoint {service_subject} for stats");
 
     // Safety: DistributedRuntime::from_settings ensures this is Some
     let token = drt.primary_lease().unwrap().child_token();
@@ -224,14 +225,14 @@ async fn app(runtime: Runtime) -> Result<()> {
         let endpoints =
             collect_endpoints(&target_component, &service_subject, scrape_timeout).await?;
         if endpoints.is_empty() {
-            tracing::warn!("No endpoints found matching {service_path}");
+            tracing::warn!("No endpoints found matching {service_subject}");
             continue;
         }
 
         let metrics = extract_metrics(&endpoints);
         let processed = postprocess_metrics(&metrics, &endpoints);
         if processed.endpoints.is_empty() {
-            tracing::warn!("No metrics found matching {service_path}");
+            tracing::warn!("No metrics found matching {service_subject}");
         } else {
             tracing::info!("Aggregated metrics: {processed:?}");
         }

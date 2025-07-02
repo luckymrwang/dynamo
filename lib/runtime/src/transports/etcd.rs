@@ -179,6 +179,8 @@ impl Client {
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id);
 
+        tracing::debug!("kv_create attempting to create key: {}, lease_id: {}", key, id);
+
         // Build the transaction
         let txn = Txn::new()
             .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Ensure the lock does not exist
@@ -190,12 +192,14 @@ impl Client {
         let result = self.client.kv_client().txn(txn).await?;
 
         if result.succeeded() {
+            tracing::debug!("kv_create succeeded for key: {}", key);
             Ok(())
         } else {
+            tracing::warn!("kv_create failed for key: {}", key);
             for resp in result.op_responses() {
                 tracing::warn!("kv_create etcd op response: {resp:?}");
             }
-            Err(error!("failed to create key"))
+            Err(error!("failed to create key: {}", key))
         }
     }
 
@@ -300,10 +304,12 @@ impl Client {
     }
 
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
+        // add trailing slash to only match string, not substring
+        // foo/bar/ -> matches foo/bar/baz but not foo/barbaz
         let mut get_response = self
             .client
             .kv_client()
-            .get(prefix.as_ref(), Some(GetOptions::new().with_prefix()))
+            .get(format!("{}/", prefix.as_ref()), Some(GetOptions::new().with_prefix()))
             .await?;
 
         Ok(get_response.take_kvs())

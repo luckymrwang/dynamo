@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{
-    protocols,
     slug::Slug,
     storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
+    descriptor::Instance
 };
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,7 @@ pub struct ModelEntry {
     pub name: String,
 
     /// How to address this on the network
-    pub endpoint: protocols::Endpoint,
+    pub instance: Instance,
 
     /// Specifies whether the model is a chat, completions, etc model.
     pub model_type: ModelType,

@@ -6,9 +6,9 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 
 use dynamo_llm::discovery::{ModelManager, ModelWatcher};
-use dynamo_llm::local_model::{LocalModel, ModelNetworkName};
+use dynamo_llm::local_model::LocalModel;
 use dynamo_llm::model_type::ModelType;
-use dynamo_runtime::component::Endpoint;
+use dynamo_runtime::entity::{EntityChain, Endpoint};
 use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::{
     distributed::DistributedConfig, logging, DistributedRuntime, Result, Runtime, Worker,
@@ -278,9 +278,9 @@ async fn list_models(
         models.push(ModelRow {
             model_type: entry.model_type.as_str().to_string(),
             name: entry.name,
-            namespace: entry.endpoint.namespace,
-            component: entry.endpoint.component,
-            endpoint: entry.endpoint.name,
+            namespace: entry.instance.identifier().namespace_name().to_string(),
+            component: entry.instance.identifier().component_name().unwrap().to_string(), // safe because instance has component_name
+            endpoint: entry.instance.identifier().endpoint_name().unwrap().to_string(), // safe because instance has endpoint_name
         });
     }
 
@@ -324,10 +324,10 @@ async fn remove_model(
         .into_iter()
         .filter(|entry| entry.model_type == model_type)
     {
-        let network_name = ModelNetworkName::from_entry(&entry, 0);
-        tracing::debug!("deleting key: {network_name}");
+        let instance_name = entry.instance.to_string();
+        tracing::debug!("deleting key: {instance_name}");
         etcd_client
-            .kv_delete(network_name.to_string(), None)
+            .kv_delete(instance_name, None)
             .await?;
     }
 
@@ -353,7 +353,7 @@ fn endpoint_from_name(
 
     let component = distributed
         .namespace(namespace)?
-        .component(component_name)?;
+        .component(&component_name)?;
 
-    Ok(component.endpoint(endpoint_name))
+    Ok(component.endpoint(&endpoint_name)?)
 }

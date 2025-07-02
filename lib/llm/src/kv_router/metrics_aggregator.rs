@@ -20,7 +20,7 @@ use crate::kv_router::KV_METRICS_ENDPOINT;
 
 use crate::kv_router::scheduler::Endpoint;
 use crate::kv_router::ProcessedEndpoints;
-use dynamo_runtime::component::Component;
+use dynamo_runtime::entity::Component;
 use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -44,7 +44,7 @@ impl KvMetricsAggregator {
         ));
 
         Self {
-            service_name: component.service_name(),
+            service_name: component.to_descriptor().slug().to_string(),
             endpoints_rx: watch_rx,
         }
     }
@@ -96,8 +96,8 @@ pub async fn collect_endpoints_task(
 ) {
     let backoff_delay = Duration::from_millis(100);
     let scrape_timeout = Duration::from_millis(300);
-    let endpoint = component.endpoint(KV_METRICS_ENDPOINT);
-    let service_subject = endpoint.subject();
+    let endpoint = component.endpoint(KV_METRICS_ENDPOINT).unwrap();
+    let service_subject = endpoint.to_descriptor().identifier().slug().to_string();
 
     loop {
         tokio::select! {
