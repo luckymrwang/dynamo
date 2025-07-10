@@ -205,9 +205,7 @@ impl OpenAIPreprocessor {
                                 self.formatter.render(request)?
                             };
 
-                            let encoding = tokio::task::block_in_place(|| {
-                                self.tokenizer.encode(&formatted_prompt)
-                            })?;
+                            let encoding = self.tokenizer.encode(&formatted_prompt)?;
 
                             if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
                                 annotations.insert(
@@ -219,22 +217,22 @@ impl OpenAIPreprocessor {
                             if request.has_annotation(ANNOTATION_TOKEN_IDS) {
                                 annotations.insert(
                                     ANNOTATION_TOKEN_IDS.to_string(),
-                                    serde_json::to_string(&encoding.token_ids)?,
+                                    serde_json::to_string(encoding.token_ids())?,
                                 );
                             }
 
-                            builder.token_ids(encoding.token_ids);
+                            builder.token_ids(encoding.token_ids().to_vec());
                         }
                         TextInput::Batch(texts) => {
-                            let token_batches: Result<Vec<Vec<u32>>, _> = texts
+                            let token_batches: Vec<Vec<u32>> = texts
                                 .par_iter()
-                                .map(|text| {
-                                    tokio::task::block_in_place(|| self.tokenizer.encode(text))
-                                        .map(|encoding| encoding.token_ids)
+                                .filter_map(|text| {
+                                    self.tokenizer
+                                        .encode(text)
+                                        .ok()
+                                        .map(|encoded| encoded.token_ids().to_vec())
                                 })
                                 .collect();
-
-                            let token_batches = token_batches?;
                             builder.batch_token_ids(Some(token_batches));
                             builder.token_ids(vec![]);
                         }
@@ -285,8 +283,8 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             async_openai::types::EmbeddingInput::String(s) => {
-                let encoding = tokio::task::block_in_place(|| self.tokenizer.encode(s))?;
-                vec![encoding.token_ids]
+                let encoding = self.tokenizer.encode(s)?;
+                vec![encoding.token_ids().to_vec()]
             }
             async_openai::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
@@ -300,7 +298,7 @@ impl OpenAIPreprocessor {
                 .await??;
                 let token_arrays: Vec<Vec<u32>> = encodings
                     .into_iter()
-                    .map(|encoding| encoding.token_ids)
+                    .map(|encoding| encoding.token_ids().to_vec())
                     .collect();
                 token_arrays
             }
