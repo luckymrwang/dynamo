@@ -164,6 +164,7 @@ impl KvbmCacheManager {
             .map_err(to_pyerr)
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn free(&self, request_id: String) -> PyResult<()> {
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager.free_blocks(&request_id);
@@ -179,6 +180,7 @@ impl KvbmCacheManager {
     }
 
     /// Free the entire slot for the given request ID.
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn free_block_hashes(&self, request_id: String) -> PyResult<()> {
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager.drop_slot(&request_id);
@@ -466,6 +468,12 @@ impl<R: RequestKey> SlotManager<R> {
 
         let slot = self.slots.get_mut(&request_id).ok_or(SlotError::NotFound)?;
 
+        // we always apply the matched blocks to the beginning of the sequence; however,
+        // if we fail to allocate the requested new blocks, vllm treats the request as never started,
+        // so we need to drop the applied immutable block. however, if we have successfully advanced
+        // the sequence state, then we rely on the scheduler to free any held blocks.
+        let first_allocation = slot.first_allocation();
+
         // first apply any new computed blocks
         // these are the blocks that were matched to the sequence hashes
         // this will advance the computed position of the slot
@@ -507,9 +515,12 @@ impl<R: RequestKey> SlotManager<R> {
         match new_blocks {
             Some(new_blocks) => Ok(Some(new_blocks)),
             None => {
-                // could not allocate new blocks and we reset the slot
-                // We always need to free all blocks here. If we don't, we may cause a livelock.
-                slot.free_blocks();
+                // note: we could free the blocks here; however, apply_computed_blocks always resets the
+                // immutable block list, avoiding the free_blocks() here allows us to hold the reference count on
+                // the blocks we intend to reuse
+                if first_allocation {
+                    slot.free_blocks();
+                }
                 Ok(None)
             }
         }

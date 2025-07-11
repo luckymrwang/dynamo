@@ -81,6 +81,10 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         }
     }
 
+    pub fn first_allocation(&self) -> bool {
+        self.immutable.is_empty() && self.mutable.is_empty()
+    }
+
     /// Updates the sequence with the given tokens.
     /// These tokens will advance the computed sequence position.
     #[tracing::instrument(level = "debug", skip(block_pool))]
