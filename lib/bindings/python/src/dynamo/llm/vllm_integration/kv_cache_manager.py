@@ -32,9 +32,11 @@ from dynamo.llm.vllm_integration.rust import BlockManager
 from dynamo.llm.vllm_integration.rust import KvbmCacheManager as RustKvbmCacheManager
 from dynamo.llm.vllm_integration.rust import KvbmRequest, SlotUpdate
 
+
 class MockSingleTypeManager:
     def cache_blocks(self, *args, **kwargs):
         pass
+
 
 class MockReqToBlockHashes:
     def __init__(self):
@@ -42,6 +44,7 @@ class MockReqToBlockHashes:
 
     def __getitem__(self, request_id: str):
         pass
+
 
 class KvbmCacheManager(KVConnectorBase_V1):
     """
@@ -358,7 +361,8 @@ class KvbmCacheManager(KVConnectorBase_V1):
     # Unused KV connector methods
 
     def build_connector_meta(
-            self, scheduler_output: SchedulerOutput) -> KVConnectorMetadata:
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         """
         Build the connector metadata for this step.
 

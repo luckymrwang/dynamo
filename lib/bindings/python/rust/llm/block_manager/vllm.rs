@@ -190,7 +190,7 @@ impl KvbmCacheManager {
         Ok(vec![])
     }
 
-    pub fn get_block_ids(&self, request_id: String) -> PyResult<Vec<BlockId>> {
+    pub fn get_block_ids(&mut self, request_id: String) -> PyResult<Vec<BlockId>> {
         self.slot_manager
             .lock()
             .map_err(to_pyerr)?
@@ -454,7 +454,7 @@ impl<R: RequestKey> SlotManager<R> {
             num_new_computed_tokens,
             new_computed_blocks,
             num_lookahead_blocks,
-            delay_cache_blocks,
+            _delay_cache_blocks,
         ) = update.dissolve();
 
         // TODO(ryan): add support for lookahead blocks
@@ -465,12 +465,6 @@ impl<R: RequestKey> SlotManager<R> {
         }
 
         let slot = self.slots.get_mut(&request_id).ok_or(SlotError::NotFound)?;
-
-        // we always apply the matched blocks to the beginning of the sequence; however,
-        // if we fail to allocate the requested new blocks, vllm treats the request as never started,
-        // so we need to drop the applied immutable block. however, if we have successfully advanced
-        // the sequence state, then we rely on the scheduler to free any held blocks.
-        let first_allocation = slot.first_allocation();
 
         // first apply any new computed blocks
         // these are the blocks that were matched to the sequence hashes
@@ -511,27 +505,18 @@ impl<R: RequestKey> SlotManager<R> {
             });
 
         match new_blocks {
-            Some(new_blocks) => {
-                if !delay_cache_blocks {
-                    slot.reset_cached_onboard_blocks();
-                }
-                Ok(Some(new_blocks))
-            }
+            Some(new_blocks) => Ok(Some(new_blocks)),
             None => {
                 // could not allocate new blocks and we reset the slot
-                // note: we could free the blocks here; however, apply_computed_blocks always resets the
-                // immutable block list, avoiding the free_blocks() here allows us to hold the reference count on
-                // the blocks we intend to reuse
-                if first_allocation {
-                    slot.free_blocks();
-                }
+                // We always need to free all blocks here. If we don't, we may cause a livelock.
+                slot.free_blocks();
                 Ok(None)
             }
         }
     }
 
-    pub fn get_block_ids(&self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {
-        let slot = self.slots.get(request_id).ok_or(SlotError::NotFound)?;
+    pub fn get_block_ids(&mut self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {
+        let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
         Ok(slot.get_block_ids())
     }
 

@@ -45,8 +45,7 @@ pub struct Slot<S: Storage, L: LocalityProvider> {
     /// It is responsible for:
     /// - Running the host and disk transfers.
     /// - Calling the async completion handler.
-    onboard_task:
-        Option<CriticalTaskExecutionHandle<Vec<ImmutableBlock<DeviceStorage, L, BasicMetadata>>>>,
+    onboard_task: Option<CriticalTaskExecutionHandle<Vec<ImmutableBlock<S, L, BasicMetadata>>>>,
 }
 
 impl<S: Storage, L: LocalityProvider> std::fmt::Debug for Slot<S, L> {
@@ -80,10 +79,6 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             onboard_blocks: None,
             onboard_task: None,
         }
-    }
-
-    pub fn first_allocation(&self) -> bool {
-        self.immutable.is_empty() && self.mutable.is_empty()
     }
 
     /// Updates the sequence with the given tokens.
@@ -320,16 +315,31 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     #[tracing::instrument(level = "debug")]
     pub fn free_blocks(&mut self) {
         self.mutable.clear();
-        let mut immutable_blocks = std::mem::take(&mut self.immutable);
-        immutable_blocks.reverse();
+        self.immutable.clear();
         self.computed_position = 0;
+
+        self.onboard_blocks = None;
+        if let Some(onboard_task) = self.onboard_task.take() {
+            onboard_task.detach();
+        }
     }
 
     /// Returns the block ids for the slot.
     /// We return in order the immutable blocks, then the mutable blocks.
-    pub fn get_block_ids(&self) -> Vec<BlockId> {
+    pub fn get_block_ids(&mut self) -> Vec<BlockId> {
         let mut block_ids = Vec::new();
         block_ids.extend(self.immutable.iter().map(|b| b.block_id()));
+
+        if let Some(onboard_task) = self.onboard_task.take() {
+            let blocks = onboard_task
+                .blocking_join()
+                .expect("Onboard task failed to complete!");
+            let onboard_ids = blocks.iter().map(|b| b.block_id()).collect::<Vec<_>>();
+            block_ids.extend(onboard_ids);
+            self.apply_immutable_blocks(blocks)
+                .expect("Failed to apply onboarded blocks");
+        }
+
         block_ids.extend(self.mutable.iter().map(|b| b.block_id()));
         block_ids
     }
@@ -389,7 +399,6 @@ impl<L: LocalityProvider> OnboardBlocks<L> {
         disk_blocks: Vec<ImmutableBlock<DiskStorage, L, BasicMetadata>>,
         is_async: bool,
     ) -> Result<Self, SlotError> {
-
         let self_ = Self {
             host_blocks,
             disk_blocks,
@@ -411,7 +420,8 @@ impl<L: LocalityProvider> OnboardBlocks<L> {
 }
 
 /// Alias for the return type of onboard operations that receive device blocks
-type DeviceBlockReceiver<L> = Receiver<Result<Vec<ImmutableBlock<DeviceStorage, L, BasicMetadata>>, BlockPoolError>>;
+type DeviceBlockReceiver<L> =
+    Receiver<Result<Vec<ImmutableBlock<DeviceStorage, L, BasicMetadata>>, BlockPoolError>>;
 
 impl<L: LocalityProvider> Slot<DeviceStorage, L> {
     #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
@@ -475,7 +485,7 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
             // When we set load_kv_async to true, our request gets put into a special queue. After we notify vLLM of the transfer completions,
             // It calls get_computed_blocks and get_num_new_matched_tokens for a second time.
             // In this second call, we match against our newly onboarded device blocks, and we drop the return value of our task
-            // to ensure that we don't indefinitely maintain a reference to our onboarded immutable blocks. 
+            // to ensure that we don't indefinitely maintain a reference to our onboarded immutable blocks.
             let handle = CriticalTaskExecutionHandle::new_with_runtime(
                 move |cancel_token| async move {
                     // Transfer host and disk blocks.
@@ -490,8 +500,9 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
                     };
 
                     // Run our completion handler to notify vLLM of the transfer completion.
-                    // TODO(jthomson04): Blocking on acquiring the GIL is a bit concerning.
+                    // TODO(jthomson04): Blocking on acquiring the GIL inside an async task is a bit concerning.
                     Python::with_gil(|py| {
+                        tracing::debug!("Notifying vLLM of block onboard completion");
                         async_completion_handler.call0(py).unwrap();
                     });
 
@@ -538,21 +549,12 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
         Ok(())
     }
 
-    /// Reset the cached onboard blocks.
-    /// This is called after get_computed_blocks is called for the second time after async onboarding.
-    pub fn reset_cached_onboard_blocks(&mut self) {
-        self.onboard_task
-            .take()
-            .map(|b| b.try_join().expect("Block onboard should have completed!"));
-    }
-
     /// Utility to initiate our block onboardings.
     fn onboard_blocks<S: Storage>(
         &mut self,
         blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
         bm: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
-    ) -> DeviceBlockReceiver<L>
-    {
+    ) -> DeviceBlockReceiver<L> {
         if !blocks.is_empty() {
             let device_blocks = self.mutable.drain(0..blocks.len()).collect();
             bm.onboard_blocks(blocks, Some(device_blocks))
@@ -644,7 +646,7 @@ mod tests {
     #[test]
     fn test_slot_creation_and_basic_state() {
         let initial_tokens = vec![1, 2, 3, 4];
-        let slot = create_slot_with_tokens(initial_tokens.clone());
+        let mut slot = create_slot_with_tokens(initial_tokens.clone());
 
         // Verify initial state
         assert_eq!(slot.num_tokens(SlotPosition::Prefill), initial_tokens.len());

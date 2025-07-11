@@ -206,9 +206,9 @@ impl<T: Send + Sync + 'static> CriticalTaskExecutionHandle<T> {
         }
     }
 
-    pub fn try_join(mut self) -> Result<T> {
+    pub fn blocking_join(mut self) -> Result<T> {
         self.detached = true;
-        match self.result_receiver.take().unwrap().try_recv() {
+        match self.result_receiver.take().unwrap().blocking_recv() {
             Ok(result) => result,
             Err(_) => {
                 // This should rarely happen - means monitor task was dropped/cancelled
@@ -629,5 +629,23 @@ mod tests {
         .unwrap();
 
         // Dropping without detaching should panic
+    }
+
+    #[test]
+    fn test_blocking_join() -> Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let parent_token = CancellationToken::new();
+        let handle = CriticalTaskExecutionHandle::new_with_runtime(
+            |_cancel_token| async move { Ok(()) },
+            parent_token,
+            "test-blocking-join-task",
+            rt.handle(),
+        )
+        .unwrap();
+
+        handle.blocking_join()
     }
 }
