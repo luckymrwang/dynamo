@@ -212,10 +212,26 @@ impl KvbmCacheManager {
         request_id: String,
         async_completion_handler: Py<PyAny>,
     ) -> PyResult<()> {
+        let request_id_clone = request_id.clone();
+        let handler = move || {
+            // Run our completion handler to notify vLLM of the transfer completion.
+            // TODO(jthomson04): This is called in an async task. Probably not a good idea to block on acquiring the GIL.
+            Python::with_gil(|py| {
+                tracing::debug!(
+                    "Notifying vLLM of onboard completion for request {}",
+                    request_id_clone
+                );
+                async_completion_handler.call0(py).map_err(|e| {
+                    anyhow::anyhow!("failed to notify vLLM of onboard completion: {:?}", e)
+                })?;
+                Ok(())
+            })
+        };
+
         self.slot_manager
             .lock()
             .map_err(to_pyerr)?
-            .trigger_onboard(&request_id, async_completion_handler, self.block_manager())
+            .trigger_onboard(&request_id, handler, self.block_manager())
             .map_err(to_pyerr)
     }
 
@@ -528,7 +544,7 @@ impl<R: RequestKey> SlotManager<R> {
 
     pub fn get_block_ids(&mut self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {
         let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
-        Ok(slot.get_block_ids())
+        slot.get_block_ids()
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
@@ -663,17 +679,17 @@ impl<R: RequestKey> SlotManager<R> {
         Ok((num_new_matched_tokens, should_onboard_async))
     }
 
-    #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
+    #[tracing::instrument(level = "debug", skip(self, completion_handler, block_manager), ret)]
     pub fn trigger_onboard(
         &mut self,
         request_id: &R,
-        async_completion_handler: Py<PyAny>,
+        completion_handler: impl FnOnce() -> anyhow::Result<()> + Send + Sync + 'static,
         block_manager: &VllmBlockManager,
     ) -> Result<(), SlotError> {
         let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
         slot.trigger_onboard(
             block_manager,
-            async_completion_handler,
+            completion_handler,
             self.rt.handle(),
             self.cancel_token.clone(),
         )?;

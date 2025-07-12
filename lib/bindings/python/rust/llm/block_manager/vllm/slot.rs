@@ -330,7 +330,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
     /// Returns the block ids for the slot.
     /// We return in order the immutable blocks, then the mutable blocks.
-    pub fn get_block_ids(&mut self) -> Vec<BlockId> {
+    pub fn get_block_ids(&mut self) -> Result<Vec<BlockId>, SlotError> {
         let mut block_ids = Vec::new();
         block_ids.extend(self.immutable.iter().map(|b| b.block_id()));
 
@@ -340,12 +340,11 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                 .expect("Onboard task failed to complete!");
             let onboard_ids = blocks.iter().map(|b| b.block_id()).collect::<Vec<_>>();
             block_ids.extend(onboard_ids);
-            self.apply_immutable_blocks(blocks)
-                .expect("Failed to apply onboarded blocks");
+            self.apply_immutable_blocks(blocks)?;
         }
 
         block_ids.extend(self.mutable.iter().map(|b| b.block_id()));
-        block_ids
+        Ok(block_ids)
     }
 
     /// Number of tokens in the requested position.
@@ -428,11 +427,11 @@ type DeviceBlockReceiver<L> =
     Receiver<Result<Vec<ImmutableBlock<DeviceStorage, L, BasicMetadata>>, BlockPoolError>>;
 
 impl<L: LocalityProvider> Slot<DeviceStorage, L> {
-    #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
+    #[tracing::instrument(level = "debug", skip(self, completion_handler, block_manager), ret)]
     pub fn trigger_onboard(
         &mut self,
         block_manager: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
-        async_completion_handler: Py<PyAny>,
+        completion_handler: impl FnOnce() -> anyhow::Result<()> + Send + Sync + 'static,
         rt: &tokio::runtime::Handle,
         cancel_token: CancellationToken,
     ) -> Result<(), SlotError> {
@@ -443,7 +442,7 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
 
         self.onboard_blocks_to_slot(
             onboard_blocks,
-            async_completion_handler,
+            completion_handler,
             block_manager,
             rt,
             cancel_token,
@@ -454,11 +453,11 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip(self, bm), ret)]
-    pub fn onboard_blocks_to_slot(
+    #[tracing::instrument(level = "debug", skip(self, completion_handler, bm), ret)]
+    fn onboard_blocks_to_slot(
         &mut self,
         onboard_blocks: OnboardBlocks<L>,
-        async_completion_handler: Py<PyAny>,
+        completion_handler: impl FnOnce() -> anyhow::Result<()> + Send + Sync + 'static,
         bm: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
         rt: &tokio::runtime::Handle,
         cancel_token: CancellationToken,
@@ -503,12 +502,7 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
                         _ = cancel_token.cancelled() => return Err(anyhow::anyhow!("onboard task cancelled")),
                     };
 
-                    // Run our completion handler to notify vLLM of the transfer completion.
-                    // TODO(jthomson04): Blocking on acquiring the GIL inside an async task is a bit concerning.
-                    Python::with_gil(|py| {
-                        tracing::debug!("Notifying vLLM of block onboard completion");
-                        async_completion_handler.call0(py).unwrap();
-                    });
+                    completion_handler()?;
 
                     // Return our onboarded device blocks.
                     // These blocks stay in the task's oneshot channel until get_computed_blocks is called for the second time.
@@ -540,19 +534,6 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
         Ok(())
     }
 
-    pub fn store_onboard_blocks(
-        &mut self,
-        onboard_blocks: OnboardBlocks<L>,
-    ) -> Result<(), SlotError> {
-        if self.onboard_blocks.is_some() {
-            return Err(SlotError::from_str("onboard blocks already stored"));
-        }
-
-        self.onboard_blocks = Some(onboard_blocks);
-
-        Ok(())
-    }
-
     /// Utility to initiate our block onboardings.
     fn onboard_blocks<S: Storage>(
         &mut self,
@@ -568,6 +549,19 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
             tx.send(Ok(vec![])).unwrap();
             rx
         }
+    }
+
+    pub fn store_onboard_blocks(
+        &mut self,
+        onboard_blocks: OnboardBlocks<L>,
+    ) -> Result<(), SlotError> {
+        if self.onboard_blocks.is_some() {
+            return Err(SlotError::from_str("onboard blocks already stored"));
+        }
+
+        self.onboard_blocks = Some(onboard_blocks);
+
+        Ok(())
     }
 }
 
@@ -658,7 +652,7 @@ mod tests {
         assert_eq!(slot.num_tokens(SlotPosition::All), initial_tokens.len());
 
         // Verify slot starts with no blocks allocated
-        assert_eq!(slot.get_block_ids().len(), 0);
+        assert_eq!(slot.get_block_ids().unwrap().len(), 0);
     }
 
     // Phase 2: Edge Cases - Empty token application
@@ -736,7 +730,7 @@ mod tests {
         let mut slot = create_slot_with_tokens(initial_tokens.clone());
 
         // Initially no blocks allocated
-        assert_eq!(slot.get_block_ids().len(), 0);
+        assert_eq!(slot.get_block_ids().unwrap().len(), 0);
 
         // Allocate blocks for initial tokens (will include extra capacity)
         let allocated_blocks =
@@ -751,7 +745,7 @@ mod tests {
         );
 
         // Verify blocks are allocated in the slot
-        assert!(slot.get_block_ids().len() >= 2);
+        assert!(slot.get_block_ids().unwrap().len() >= 2);
 
         // Complete prefill token by token to work around assertion bug
         for (i, token) in initial_tokens.iter().enumerate() {
@@ -1092,7 +1086,7 @@ mod tests {
         }
 
         let slot1_hashes = slot1.sequence_hashes(SlotPosition::All);
-        let slot1_blocks = slot1.get_block_ids();
+        let slot1_blocks = slot1.get_block_ids().unwrap();
 
         println!("Slot1 final state:");
         println!("  Sequence hashes: {:?}", slot1_hashes);
@@ -1125,7 +1119,7 @@ mod tests {
         let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok(), "Cache hit failed: {:?}", result.err());
 
-        let slot2_blocks = slot2.get_block_ids();
+        let slot2_blocks = slot2.get_block_ids().unwrap();
         println!("Slot2 final state:");
         println!("  Block IDs: {:?}", slot2_blocks);
         println!(
@@ -1186,7 +1180,7 @@ mod tests {
         }
 
         let cache_miss_duration = start_time.elapsed();
-        let slot1_blocks = slot1.get_block_ids();
+        let slot1_blocks = slot1.get_block_ids().unwrap();
         let slot1_hashes = slot1.sequence_hashes(SlotPosition::All);
 
         println!("Cache miss workflow completed in {:?}", cache_miss_duration);
@@ -1208,7 +1202,7 @@ mod tests {
         assert!(result.is_ok());
 
         let cache_hit_duration = start_time.elapsed();
-        let slot2_blocks = slot2.get_block_ids();
+        let slot2_blocks = slot2.get_block_ids().unwrap();
 
         println!("Cache hit workflow completed in {:?}", cache_hit_duration);
         println!("  - Applied {} blocks in batch", slot2_blocks.len());
@@ -1255,7 +1249,7 @@ mod tests {
         }
 
         let hashes_a = slot_a1.sequence_hashes(SlotPosition::All);
-        let blocks_a1 = slot_a1.get_block_ids();
+        let blocks_a1 = slot_a1.get_block_ids().unwrap();
 
         // Create first slot with tokens_b (cache miss)
         let mut slot_b1 = Slot::new(tokens_b.clone().into(), BLOCK_SIZE, salt);
@@ -1269,7 +1263,7 @@ mod tests {
         }
 
         let hashes_b = slot_b1.sequence_hashes(SlotPosition::All);
-        let blocks_b1 = slot_b1.get_block_ids();
+        let blocks_b1 = slot_b1.get_block_ids().unwrap();
 
         // Verify different sequences have different hashes and blocks
         assert_ne!(
@@ -1302,8 +1296,8 @@ mod tests {
         let result = slot_b2.initialize_with_device_matches(cached_blocks_b);
         assert!(result.is_ok());
 
-        let blocks_a2 = slot_a2.get_block_ids();
-        let blocks_b2 = slot_b2.get_block_ids();
+        let blocks_a2 = slot_a2.get_block_ids().unwrap();
+        let blocks_b2 = slot_b2.get_block_ids().unwrap();
 
         // Verify block sharing within same sequences
         assert_eq!(blocks_a1, blocks_a2, "Sequence A slots should share blocks");
@@ -1351,8 +1345,8 @@ mod tests {
 
         let hashes1 = slot1.sequence_hashes(SlotPosition::All);
         let hashes2 = slot2.sequence_hashes(SlotPosition::All);
-        let blocks1 = slot1.get_block_ids();
-        let blocks2 = slot2.get_block_ids();
+        let blocks1 = slot1.get_block_ids().unwrap();
+        let blocks2 = slot2.get_block_ids().unwrap();
 
         // Different salts should prevent block sharing
         assert_ne!(
@@ -1989,5 +1983,282 @@ mod tests {
 
         assert_eq!(slot.immutable.len(), 2);
         assert_eq!(slot.mutable.len(), 1);
+    }
+}
+
+#[cfg(all(test, feature = "testing-cuda"))]
+mod test_onboard {
+    use super::*;
+
+    use rstest::*;
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
+
+    use dynamo_llm::block_manager::{
+        block::{locality::Local, BasicMetadata},
+        locality,
+        pool::BlockPool,
+        storage::{DeviceAllocator, PinnedAllocator},
+        KvBlockManager, KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig,
+        KvManagerRuntimeConfig,
+    };
+    use dynamo_llm::tokens::TokenBlock;
+
+    const BLOCK_SIZE: usize = 4;
+
+    struct TestFixture {
+        bm: KvBlockManager<Local, BasicMetadata>,
+        runtime: Arc<tokio::runtime::Runtime>,
+    }
+
+    impl TestFixture {
+        fn new() -> Self {
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+
+            let runtime = Arc::new(runtime);
+
+            let config = KvBlockManagerConfig::builder()
+                .runtime(
+                    KvManagerRuntimeConfig::builder()
+                        .worker_id(0)
+                        .async_runtime(Some(runtime.clone()))
+                        .build()
+                        .unwrap(),
+                )
+                .model(
+                    KvManagerModelConfig::builder()
+                        .num_layers(3)
+                        .outer_dim(2)
+                        .page_size(4)
+                        .inner_dim(16)
+                        .build()
+                        .unwrap(),
+                )
+                .host_layout(
+                    KvManagerLayoutConfig::builder()
+                        .num_blocks(16)
+                        .allocator(PinnedAllocator::new().unwrap())
+                        .build()
+                        .unwrap(),
+                )
+                .device_layout(
+                    KvManagerLayoutConfig::builder()
+                        .num_blocks(16)
+                        .allocator(DeviceAllocator::new(0).unwrap())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap();
+
+            let bm = runtime.block_on(async {
+                KvBlockManager::<locality::Local, BasicMetadata>::new(config)
+                    .await
+                    .unwrap()
+            });
+
+            Self { bm, runtime }
+        }
+    }
+
+    struct AsyncHandler {
+        tx: Option<oneshot::Sender<()>>,
+        rx: oneshot::Receiver<()>,
+    }
+
+    impl AsyncHandler {
+        fn new() -> Self {
+            let (tx, rx) = oneshot::channel();
+
+            Self {
+                tx: Some(tx),
+                rx: rx,
+            }
+        }
+
+        fn handler(&mut self) -> impl FnOnce() -> anyhow::Result<()> + Send + Sync + 'static {
+            let tx = self.tx.take().unwrap();
+            move || {
+                let _ = tx.send(());
+                Ok(())
+            }
+        }
+
+        fn rx(self) -> oneshot::Receiver<()> {
+            let AsyncHandler { rx, .. } = self;
+            rx
+        }
+    }
+
+    fn make_immutable_blocks<S: Storage>(
+        pool: &BlockPool<S, Local, BasicMetadata>,
+        blocks: Vec<TokenBlock>,
+    ) -> Vec<ImmutableBlock<S, Local, BasicMetadata>> {
+        let mut mutable_blocks = pool.allocate_blocks_blocking(blocks.len()).unwrap();
+
+        for (i, block) in blocks.iter().enumerate() {
+            mutable_blocks[i].apply_token_block(block.clone()).unwrap();
+        }
+
+        pool.register_blocks_blocking(mutable_blocks).unwrap()
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_onboard_blocks_without_device_matches(#[case] is_async: bool) {
+        let fixture = TestFixture::new();
+
+        let device = fixture.bm.device();
+        let host = fixture.bm.host();
+
+        let tokens = vec![0; BLOCK_SIZE * 3];
+
+        let mut slot = Slot::new(tokens.clone().into(), BLOCK_SIZE, 0);
+
+        let seq = TokenBlockSequence::new(tokens.clone().into(), BLOCK_SIZE as u32, Some(0));
+
+        let immutable_host_blocks =
+            make_immutable_blocks(host.as_ref().unwrap(), seq.blocks()[0..2].to_vec());
+
+        let onboard_blocks = OnboardBlocks::new(immutable_host_blocks, vec![], is_async).unwrap();
+
+        slot.store_onboard_blocks(onboard_blocks).unwrap();
+
+        slot.allocate_blocks(BLOCK_SIZE * 3, device.as_ref().unwrap());
+
+        assert_eq!(slot.immutable.len(), 0);
+        assert_eq!(slot.mutable.len(), 3);
+        assert_eq!(slot.num_tokens(SlotPosition::Computed), 0);
+
+        let mut handler = AsyncHandler::new();
+
+        slot.trigger_onboard(
+            &fixture.bm,
+            handler.handler(),
+            &fixture.runtime.handle(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+
+        if is_async {
+            // Make sure our handler gets called.
+            handler.rx().blocking_recv().unwrap();
+
+            // Until we flush the onboarded blocks, the number of computed tokens should be the same.
+            assert_eq!(slot.num_tokens(SlotPosition::Computed), 0);
+
+            // Flush the onboarded blocks.
+            let block_ids = slot.get_block_ids().unwrap();
+            assert_eq!(block_ids.len(), 3);
+        }
+
+        assert_eq!(slot.immutable.len(), 2);
+        assert_eq!(slot.mutable.len(), 1);
+        assert_eq!(slot.num_tokens(SlotPosition::Computed), BLOCK_SIZE * 2);
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_onboard_blocks_with_device_matches(#[case] is_async: bool) {
+        let fixture = TestFixture::new();
+
+        let device = fixture.bm.device();
+        let host = fixture.bm.host();
+
+        let tokens = vec![0; BLOCK_SIZE * 3];
+
+        let mut slot = Slot::new(tokens.clone().into(), BLOCK_SIZE, 0);
+
+        let seq = TokenBlockSequence::new(tokens.clone().into(), BLOCK_SIZE as u32, Some(0));
+
+        let immutable_device_blocks =
+            make_immutable_blocks(device.as_ref().unwrap(), vec![seq.blocks()[0].clone()]);
+
+        slot.initialize_with_device_matches(immutable_device_blocks)
+            .unwrap();
+
+        let immutable_host_blocks =
+            make_immutable_blocks(host.as_ref().unwrap(), seq.blocks()[1..].to_vec());
+
+        let onboard_blocks = OnboardBlocks::new(immutable_host_blocks, vec![], is_async).unwrap();
+
+        slot.store_onboard_blocks(onboard_blocks).unwrap();
+
+        slot.allocate_blocks(BLOCK_SIZE * 2, device.as_ref().unwrap());
+
+        let mut handler = AsyncHandler::new();
+
+        slot.trigger_onboard(
+            &fixture.bm,
+            handler.handler(),
+            &fixture.runtime.handle(),
+            CancellationToken::new(),
+        )
+        .unwrap();
+
+        if is_async {
+            // Make sure our handler gets called.
+            handler.rx().blocking_recv().unwrap();
+
+            // Until we flush the onboarded blocks, the number of computed tokens should be the same.
+            assert_eq!(slot.num_tokens(SlotPosition::Computed), BLOCK_SIZE);
+
+            // Flush the onboarded blocks.
+            let block_ids = slot.get_block_ids().unwrap();
+            assert_eq!(block_ids.len(), 3);
+        }
+
+        assert_eq!(slot.num_tokens(SlotPosition::Computed), BLOCK_SIZE * 3);
+
+        assert_eq!(slot.immutable.len(), 3);
+        assert_eq!(slot.mutable.len(), 0);
+    }
+
+    #[rstest]
+    #[case(false)]
+    #[case(true)]
+    fn test_onboard_blocks_incorrect_hash(#[case] is_async: bool) {
+        let fixture = TestFixture::new();
+
+        let device = fixture.bm.device();
+        let host = fixture.bm.host();
+
+        let correct_tokens = vec![0; BLOCK_SIZE * 3];
+
+        let mut slot = Slot::new(correct_tokens.clone().into(), BLOCK_SIZE, 0);
+
+        let wrong_tokens = vec![1; BLOCK_SIZE * 3];
+
+        let wrong_seq =
+            TokenBlockSequence::new(wrong_tokens.clone().into(), BLOCK_SIZE as u32, Some(0));
+
+        let immutable_host_blocks =
+            make_immutable_blocks(host.as_ref().unwrap(), wrong_seq.blocks()[0..2].to_vec());
+
+        let onboard_blocks = OnboardBlocks::new(immutable_host_blocks, vec![], is_async).unwrap();
+
+        slot.store_onboard_blocks(onboard_blocks).unwrap();
+
+        slot.allocate_blocks(BLOCK_SIZE * 3, device.as_ref().unwrap());
+
+        let mut handler = AsyncHandler::new();
+
+        let res = slot.trigger_onboard(
+            &fixture.bm,
+            handler.handler(),
+            &fixture.runtime.handle(),
+            CancellationToken::new(),
+        );
+
+        if is_async {
+            // If we're async, we expect this initial call to work. It should throw an error when we flush it (via get_block_ids).
+            assert!(res.is_ok());
+            assert!(slot.get_block_ids().is_err());
+        } else {
+            // If we're not async, we expect this initial call to throw an error.
+            assert!(res.is_err());
+        }
     }
 }
