@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This is one of the only variables that must be set currently, most of the rest may
-# just work out of the box if following the steps in the README.
+# This is one of the only variables that must be set currently. The image must contain
+# genai-perf installation.
 IMAGE_BENCH="${IMAGE_BENCH:-""}"
 
 # Set to mount current host directory to /mnt inside the container as an example,
