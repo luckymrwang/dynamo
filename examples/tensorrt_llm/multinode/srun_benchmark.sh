@@ -14,23 +14,24 @@ DEFAULT_MOUNT="${PWD}/../:/mnt,${PWD}/../../../benchmarks:/benchmarks"
 MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 # Set the default values for the benchmark parameters
-MODE="${MODE:-aggregated}"
-KIND="${KIND:-dynamo_trtllm}"
-TP="${TP:-1}"
-DP="${DP:-1}"
-PREFILL_TP="${PREFILL_TP:-1}"
-PREFILL_DP="${PREFILL_DP:-1}"
-DECODE_TP="${DECODE_TP:-1}"
-DECODE_DP="${DECODE_DP:-1}"
-SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-nvidia/DeepSeek-R1-FP4}"
-INPUT_SEQ_LEN="${INPUT_SEQ_LEN:-3000}"
-OUTPUT_SEQ_LEN="${OUTPUT_SEQ_LEN:-150}"
-CONCURRENCY="${CONCURRENCY:-1,2,4,8,16,32,64,128,256}"
-ARTIFACTS_ROOT_DIR="${ARTIFACTS_ROOT_DIR:-/mnt/artifacts_root}"
+export MODE="${MODE:-disaggregated}"
+export KIND="${KIND:-dynamo_trtllm_wideep}"
+export TP="${TP:-1}"
+export DP="${DP:-1}"
+export PREFILL_TP="${PREFILL_TP:-4}"
+export PREFILL_DP="${PREFILL_DP:-7}"
+export DECODE_TP="${DECODE_TP:-32}"
+export DECODE_DP="${DECODE_DP:-1}"
+export SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-nvidia/DeepSeek-R1-FP4}"
+export INPUT_SEQ_LEN="${INPUT_SEQ_LEN:-8192}"
+export OUTPUT_SEQ_LEN="${OUTPUT_SEQ_LEN:-1024}"
+export CONCURRENCY="${CONCURRENCY:-1024}"
+export ARTIFACTS_ROOT_DIR="${ARTIFACTS_ROOT_DIR:-/mnt/artifacts_root}"
 
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
 ACCOUNT="$(sacctmgr -nP show assoc where user=$(whoami) format=account)"
+export HEAD_NODE="${SLURMD_NODENAME}"
 export HEAD_NODE_IP="$(hostname -i)"
 
 if [[ -z ${IMAGE} ]]; then
