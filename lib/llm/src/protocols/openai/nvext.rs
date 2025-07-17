@@ -224,7 +224,7 @@ mod tests {
         fn test_modality_validation(modality in any::<String>()) {
             let nv_ext = NvExt::builder().modality(modality.clone()).build().unwrap();
             let validation_result = nv_ext.validate();
-            
+
             if modality == "image" {
                 assert!(validation_result.is_ok(), "modality 'image' should be valid");
             } else {
