@@ -12,6 +12,7 @@ import uvloop
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
+from transformers import AutoConfig
 
 from dynamo.llm import (
     ModelType,
@@ -33,6 +34,7 @@ def _setup_path_and_imports():
     if parent_dir not in sys.path:
         sys.path.insert(0, parent_dir)
 
+    from utils.multimodal_processor import MultimodalRequestProcessor
     from utils.request_handlers.handlers import (
         RequestHandlerConfig,
         RequestHandlerFactory,
@@ -51,6 +53,7 @@ def _setup_path_and_imports():
         cmd_line_args,
         is_first_worker,
         parse_endpoint,
+        MultimodalRequestProcessor,
     )
 
 
@@ -62,6 +65,7 @@ def _setup_path_and_imports():
     cmd_line_args,
     is_first_worker,
     parse_endpoint,
+    MultimodalRequestProcessor,
 ) = _setup_path_and_imports()
 
 # Default buffer size for kv cache events.
@@ -166,13 +170,18 @@ async def init(runtime: DistributedRuntime, config: Config):
         if is_first_worker(config):
             # Register the model with the endpoint if only the worker is first in the disaggregation chain.
             await register_llm(
-                ModelType.Backend,
+                ModelType.Chat,
                 endpoint,
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
             )
-
+        model_config = AutoConfig.from_pretrained(
+            config.model_path, trust_remote_code=True
+        )
+        multimodal_processor = MultimodalRequestProcessor(
+            model_type=model_config.model_type, model_dir=config.model_path
+        )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -182,6 +191,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            multimodal_processor=multimodal_processor,
+            tokenizer=tokenizer,
         )
 
         if config.publish_events_and_metrics and is_first_worker(config):
