@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 FROM nixl:v0.1.0.dev.0780842
 
 # Install sudo, LLVM (latest stable), and configure passwordless sudo for all users
