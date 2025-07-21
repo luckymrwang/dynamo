@@ -40,7 +40,7 @@
             ],
             "settings": {
                 "terminal.integrated.defaultProfile.linux": "bash",
-                // "python.defaultInterpreterPath": "/home/ubuntu/.venv/bin/python",
+                "python.defaultInterpreterPath": "venv/bin/python",
                 "python.linting.enabled": true,
                 "rust-analyzer.memoryLimit": 4096, // larger memory limit to reduce latency
                 "rust-analyzer.checkOnSave.command": "clippy",
