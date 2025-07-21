@@ -50,6 +50,10 @@ fi
 # Activate the virtual environment for this script
 source "$VENV_PATH/bin/activate"
 
+uv pip install -r .devcontainer/requirements.txt
+
+pre-commit install
+
 
 # # Changing permission to match local user since volume mounts default to root ownership
 # sudo chown -R ubuntu:ubuntu ~/.cache/pre-commit
