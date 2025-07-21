@@ -37,38 +37,52 @@ retry() {
 
 set -xe
 
-# Changing permission to match local user since volume mounts default to root ownership
-sudo chown -R ubuntu:ubuntu ~/.cache/pre-commit
-
-# Pre-commit hooks
-cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks
-pre-commit run --all-files || true # don't fail the build if pre-commit hooks fail
-
-# Set build directory
-mkdir -p $HOME/dynamo/.build/target
-export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
-
-# build project, it will be saved at $HOME/dynamo/.build/target
-cargo build --locked --profile dev --features mistralrs
-cargo doc --no-deps
-
-# create symlinks for the binaries in the deploy directory
-mkdir -p $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin
-ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
-
-# install the python bindings
-cd $HOME/dynamo/lib/bindings/python && retry maturin develop
-
-# installs overall python packages, grabs binaries from .build/target/debug
-cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
-
-export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
-
-# TODO: Deprecated except vLLM v0
-if ! grep -q "export VLLM_KV_CAPI_PATH=" ~/.bashrc; then
-    echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
+# Create virtual environment if it doesn't exist
+VENV_PATH="venv"
+if [ ! -d "$VENV_PATH" ]; then
+    echo "🐍 Creating virtual environment at $VENV_PATH..."
+    uv venv "$VENV_PATH"
+    echo "✅ Virtual environment created successfully"
+else
+    echo "🐍 Virtual environment already exists at $VENV_PATH"
 fi
 
-if ! grep -q "export GPG_TTY=" ~/.bashrc; then
-    echo "export GPG_TTY=$(tty)" >> ~/.bashrc
-fi
+# Activate the virtual environment for this script
+source "$VENV_PATH/bin/activate"
+
+
+# # Changing permission to match local user since volume mounts default to root ownership
+# sudo chown -R ubuntu:ubuntu ~/.cache/pre-commit
+
+# # Pre-commit hooks
+# cd $HOME/dynamo && pre-commit install && retry pre-commit install-hooks
+# pre-commit run --all-files || true # don't fail the build if pre-commit hooks fail
+
+# # Set build directory
+# mkdir -p $HOME/dynamo/.build/target
+# export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
+
+# # build project, it will be saved at $HOME/dynamo/.build/target
+# cargo build --locked --profile dev --features mistralrs
+# cargo doc --no-deps
+
+# # create symlinks for the binaries in the deploy directory
+# mkdir -p $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin
+# ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
+
+# # install the python bindings
+# cd $HOME/dynamo/lib/bindings/python && retry maturin develop
+
+# # installs overall python packages, grabs binaries from .build/target/debug
+# cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
+
+# export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
+
+# # TODO: Deprecated except vLLM v0
+# if ! grep -q "export VLLM_KV_CAPI_PATH=" ~/.bashrc; then
+#     echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
+# fi
+
+# if ! grep -q "export GPG_TTY=" ~/.bashrc; then
+#     echo "export GPG_TTY=$(tty)" >> ~/.bashrc
+# fi

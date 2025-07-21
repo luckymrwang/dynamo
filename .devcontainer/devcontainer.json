@@ -40,7 +40,7 @@
             ],
             "settings": {
                 "terminal.integrated.defaultProfile.linux": "bash",
-                "python.defaultInterpreterPath": "/home/ubuntu/.venv/bin/python",
+                // "python.defaultInterpreterPath": "/home/ubuntu/.venv/bin/python",
                 "python.linting.enabled": true,
                 "rust-analyzer.memoryLimit": 4096, // larger memory limit to reduce latency
                 "rust-analyzer.checkOnSave.command": "clippy",
@@ -60,7 +60,7 @@
         }
     },
     "userEnvProbe": "interactiveShell",
-    // "postCreateCommand": "/bin/bash /work/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
+    "postCreateCommand": "/bin/bash .devcontainer/post-create.sh", // Runs cargo build and pip installs packages
     "containerEnv": {
         "CARGO_HOME": "/home/ubuntu/.cargo"
     },
