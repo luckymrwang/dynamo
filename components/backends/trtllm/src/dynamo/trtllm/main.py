@@ -93,7 +93,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "model": model_path,
         "tensor_parallel_size": config.tensor_parallel_size,
         "backend": "pytorch",
-        "skip_tokenizer_init": True,
+        "skip_tokenizer_init": False,
     }
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
