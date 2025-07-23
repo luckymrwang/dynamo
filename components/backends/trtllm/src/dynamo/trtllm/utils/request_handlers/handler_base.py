@@ -258,6 +258,13 @@ class HandlerBase:
         model_name = request.get("model", "unknown_model")
 
         # NEW: Updated engine call to include multimodal data
+        sampling_params.end_id = None
+        sampling_params.pad_id = None
+        sampling_params.skip_special_tokens = True
+        sampling_params.add_special_tokens = True
+        sampling_params.spaces_between_special_tokens = True
+        sampling_params.stop_token_ids = None
+        sampling_params.logprobs = False
         async for res in self.engine.llm.generate_async(
             inputs=processed_input,  # Use the correctly extracted inputs
             sampling_params=sampling_params,
