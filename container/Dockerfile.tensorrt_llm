@@ -491,6 +491,7 @@ COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 # uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match
 # is also specified. So set the configurable index as a --extra-index-url for prioritization.
 RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
+    --index-strategy unsafe-best-match \
     "${TENSORRTLLM_PIP_WHEEL}" && \
     uv pip install ai-dynamo nixl --find-links wheelhouse
 
