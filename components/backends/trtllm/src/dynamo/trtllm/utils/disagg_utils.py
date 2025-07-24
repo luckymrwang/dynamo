@@ -36,21 +36,21 @@ class DisaggregatedParamsCodec:
             logger.debug("🔄 DisaggregatedParamsCodec.decode: Input is None")
             return None
 
-        logger.info("=" * 50)
-        logger.info("🔓 DECODING DISAGGREGATED PARAMETERS")
-        logger.info("=" * 50)
-        logger.info("📥 Input parameters:")
-        logger.info(f"   ➜ Request type: {disaggregated_params.request_type}")
-        logger.info(f"   ➜ Context request ID: {disaggregated_params.ctx_request_id}")
-        logger.info(f"   ➜ First gen tokens: {disaggregated_params.first_gen_tokens}")
-        logger.info(f"   ➜ Draft tokens: {disaggregated_params.draft_tokens}")
+        logger.debug("=" * 50)
+        logger.debug("🔓 DECODING DISAGGREGATED PARAMETERS")
+        logger.debug("=" * 50)
+        logger.debug("📥 Input parameters:")
+        logger.debug(f"   ➜ Request type: {disaggregated_params.request_type}")
+        logger.debug(f"   ➜ Context request ID: {disaggregated_params.ctx_request_id}")
+        logger.debug(f"   ➜ First gen tokens: {disaggregated_params.first_gen_tokens}")
+        logger.debug(f"   ➜ Draft tokens: {disaggregated_params.draft_tokens}")
 
         opaque_state_size = (
             len(disaggregated_params.opaque_state)
             if disaggregated_params.opaque_state
             else 0
         )
-        logger.info(f"   ➜ Encoded opaque state size: {opaque_state_size} characters")
+        logger.debug(f"   ➜ Encoded opaque state size: {opaque_state_size} characters")
 
         opaque_state = (
             base64.b64decode(disaggregated_params.opaque_state)
@@ -59,8 +59,8 @@ class DisaggregatedParamsCodec:
         )
 
         decoded_state_size = len(opaque_state) if opaque_state else 0
-        logger.info(f"🔄 Decoded opaque state size: {decoded_state_size} bytes")
-        logger.info("✅ Disaggregated parameters successfully decoded")
+        logger.debug(f"🔄 Decoded opaque state size: {decoded_state_size} bytes")
+        logger.debug("✅ Disaggregated parameters successfully decoded")
 
         return DisaggregatedParams(
             request_type=disaggregated_params.request_type,
@@ -78,21 +78,21 @@ class DisaggregatedParamsCodec:
             logger.debug("🔄 DisaggregatedParamsCodec.encode: Input is None")
             return None
 
-        logger.info("=" * 50)
-        logger.info("🔒 ENCODING DISAGGREGATED PARAMETERS")
-        logger.info("=" * 50)
-        logger.info("📤 Input parameters:")
-        logger.info(f"   ➜ Request type: {disaggregated_params.request_type}")
-        logger.info(f"   ➜ Context request ID: {disaggregated_params.ctx_request_id}")
-        logger.info(f"   ➜ First gen tokens: {disaggregated_params.first_gen_tokens}")
-        logger.info(f"   ➜ Draft tokens: {disaggregated_params.draft_tokens}")
+        logger.debug("=" * 50)
+        logger.debug("🔒 ENCODING DISAGGREGATED PARAMETERS")
+        logger.debug("=" * 50)
+        logger.debug("📤 Input parameters:")
+        logger.debug(f"   ➜ Request type: {disaggregated_params.request_type}")
+        logger.debug(f"   ➜ Context request ID: {disaggregated_params.ctx_request_id}")
+        logger.debug(f"   ➜ First gen tokens: {disaggregated_params.first_gen_tokens}")
+        logger.debug(f"   ➜ Draft tokens: {disaggregated_params.draft_tokens}")
 
         raw_state_size = (
             len(disaggregated_params.opaque_state)
             if disaggregated_params.opaque_state
             else 0
         )
-        logger.info(f"   ➜ Raw opaque state size: {raw_state_size} bytes")
+        logger.debug(f"   ➜ Raw opaque state size: {raw_state_size} bytes")
 
         encoded_opaque_state = (
             base64.b64encode(disaggregated_params.opaque_state).decode("utf-8")
@@ -101,7 +101,7 @@ class DisaggregatedParamsCodec:
         )
 
         encoded_state_size = len(encoded_opaque_state) if encoded_opaque_state else 0
-        logger.info(f"🔄 Encoded opaque state size: {encoded_state_size} characters")
+        logger.debug(f"🔄 Encoded opaque state size: {encoded_state_size} characters")
         logger.info(
             "✅ Disaggregated parameters successfully encoded for network transfer"
         )

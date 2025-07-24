@@ -117,33 +117,33 @@ class HandlerBase:
         ):
             request["sampling_options"]["temperature"] = request.pop("temperature")
 
-        logger.info("=" * 80)
-        logger.info("🚀 DISAGGREGATION FLOW STARTED")
-        logger.info("=" * 80)
-        logger.info("📋 Request Overview:")
-        logger.info(f"   Mode: {self.disaggregation_mode.value}")
-        logger.info(f"   Strategy: {self.disaggregation_strategy.value}")
+        logger.debug("=" * 80)
+        logger.debug("🚀 DISAGGREGATION FLOW STARTED")
+        logger.debug("=" * 80)
+        logger.debug("📋 Request Overview:")
+        logger.debug(f"   Mode: {self.disaggregation_mode.value}")
+        logger.debug(f"   Strategy: {self.disaggregation_strategy.value}")
 
         # NEW: Check for multimodal request and process it
         if "messages" in request and self.multimodal_processor:
-            logger.info("🖼️  MULTIMODAL REQUEST DETECTED")
-            logger.info("🔄 Processing with MultimodalRequestProcessor...")
+            logger.debug("🖼️  MULTIMODAL REQUEST DETECTED")
+            logger.debug("🔄 Processing with MultimodalRequestProcessor...")
             processed_inputs = await self.multimodal_processor.process_openai_request(
                 request
             )
 
             if "processed_inputs" in processed_inputs:
-                logger.info("✅ Multimodal processing completed")
+                logger.debug("✅ Multimodal processing completed")
                 processed_input = processed_inputs["processed_inputs"][0]
-                logger.info("processed_input: ", processed_input)
+                logger.debug("processed_input: ", processed_input)
 
             else:
-                logger.info("📝 No multimodal content, using original request")
+                logger.debug("📝 No multimodal content, using original request")
         else:
             # Original text-only flow
-            logger.info(f"   Input tokens count: {len(request.get('token_ids', []))}")
+            logger.debug(f"   Input tokens count: {len(request.get('token_ids', []))}")
 
-        logger.info(
+        logger.debug(
             f"   Max tokens requested: {request.get('stop_conditions', {}).get('max_tokens', 'Not specified')}"
         )
 
@@ -167,17 +167,17 @@ class HandlerBase:
         # Decode the disaggregated params from the request
         disaggregated_params = None
 
-        logger.info("=" * 60)
-        logger.info("🔧 DISAGGREGATED PARAMETERS SETUP")
-        logger.info("=" * 60)
+        logger.debug("=" * 60)
+        logger.debug("🔧 DISAGGREGATED PARAMETERS SETUP")
+        logger.debug("=" * 60)
 
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             request["stop_conditions"]["max_tokens"] = 1
             disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
-            logger.info(f"Prefill disaggregated_params: {disaggregated_params}")
+            logger.debug(f"Prefill disaggregated_params: {disaggregated_params}")
 
         if "disaggregated_params" in request:
-            logger.info(
+            logger.debug(
                 "📥 DECODE MODE: Received disaggregated parameters from prefill worker"
             )
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
@@ -186,19 +186,19 @@ class HandlerBase:
                 )
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
 
-            logger.info("   ➜ Decoding received disaggregated parameters...")
+            logger.debug("   ➜ Decoding received disaggregated parameters...")
             received_params = DisaggregatedParams(**request["disaggregated_params"])
-            logger.info(f"   ➜ Raw received params: {received_params}")
+            logger.debug(f"   ➜ Raw received params: {received_params}")
 
             disaggregated_params = DisaggregatedParamsCodec.decode(received_params)
             disaggregated_params.request_type = "generation_only"
-            logger.info(
+            logger.debug(
                 f"   ➜ Context request ID: {disaggregated_params.ctx_request_id}"
             )
-            logger.info(
+            logger.debug(
                 f"   ➜ First generation tokens: {disaggregated_params.first_gen_tokens}"
             )
-            logger.info(
+            logger.debug(
                 f"   ➜ Opaque state size: {len(disaggregated_params.opaque_state) if disaggregated_params.opaque_state else 0} bytes"
             )
 
@@ -212,7 +212,7 @@ class HandlerBase:
             raise ValueError("Disaggregated params are required for decode mode")
 
         if disaggregated_params is None:
-            logger.info(
+            logger.debug(
                 "🔄 AGGREGATED MODE: No disaggregated parameters (normal inference)"
             )
 
@@ -225,14 +225,14 @@ class HandlerBase:
             if not value:
                 continue
             if hasattr(sampling_params, key):
-                logger.info(
+                logger.debug(
                     f"   ➜ Updating {key}: {getattr(sampling_params, key)} → {value}"
                 )
                 setattr(sampling_params, key, value)
 
         max_tokens = request["stop_conditions"]["max_tokens"]
         if max_tokens:
-            logger.info(f"   ➜ Setting max_tokens: {max_tokens}")
+            logger.debug(f"   ➜ Setting max_tokens: {max_tokens}")
             sampling_params.max_tokens = max_tokens
 
         # TODO: Instead of True, we should use streaming from the request.
@@ -240,19 +240,19 @@ class HandlerBase:
         streaming = (
             False if self.disaggregation_mode == DisaggregationMode.PREFILL else True
         )
-        logger.info(
+        logger.debug(
             f"🌊 Streaming mode: {streaming} (prefill=False, decode/aggregated=True)"
         )
 
-        logger.info("=" * 60)
-        logger.info("🏭 TENSORRT-LLM ENGINE GENERATION")
-        logger.info("=" * 60)
-        logger.info("🔄 Starting generation with:")
-        logger.info(f"   ➜ Sampling params: {sampling_params}")
-        logger.info(
+        logger.debug("=" * 60)
+        logger.debug("🏭 TENSORRT-LLM ENGINE GENERATION")
+        logger.debug("=" * 60)
+        logger.debug("🔄 Starting generation with:")
+        logger.debug(f"   ➜ Sampling params: {sampling_params}")
+        logger.debug(
             f"   ➜ Disaggregated params: {'Present' if disaggregated_params else 'None'}"
         )
-        logger.info(f"   ➜ Streaming: {streaming}")
+        logger.debug(f"   ➜ Streaming: {streaming}")
 
         request_id = request.get("id") or request.get("request_id", "unknown-id")
         model_name = request.get("model", "unknown_model")
@@ -271,7 +271,7 @@ class HandlerBase:
             # TRTLLM engine needs to start generating tokens first before stats
             # can be retrieved.
             if self.first_generation and self.publisher:
-                logger.info("📊 Starting publisher for metrics collection")
+                logger.debug("📊 Starting publisher for metrics collection")
                 self.publisher.start()
 
             logger.debug(
@@ -279,8 +279,8 @@ class HandlerBase:
             )
 
             if res.finished and self.disaggregation_mode != DisaggregationMode.PREFILL:
-                logger.info("✅ GENERATION COMPLETE")
-                logger.info("   ➜ Response finished, yielding final stop token")
+                logger.debug("✅ GENERATION COMPLETE")
+                logger.debug("   ➜ Response finished, yielding final stop token")
                 final_choice = {
                     "index": 0,
                     "delta": {},
@@ -307,7 +307,7 @@ class HandlerBase:
             next_total_toks = len(output.token_ids)
             new_tokens = output.token_ids[num_output_tokens_so_far:]
             delta_text = self.tokenizer.decode(new_tokens)
-            logger.info(f"delta_text: {delta_text}")
+            logger.debug(f"delta_text: {delta_text}")
 
             delta = {"content": delta_text if delta_text else ""}
             if self.first_generation:

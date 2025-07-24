@@ -64,14 +64,14 @@ class AggregatedHandler(HandlerBase):
 
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
-        logger.info("🔧 Initialized AggregatedHandler")
-        logger.info(f"   ➜ Mode: {config.disaggregation_mode.value}")
+        logger.debug("🔧 Initialized AggregatedHandler")
+        logger.debug(f"   ➜ Mode: {config.disaggregation_mode.value}")
 
     async def generate(self, request: dict):
-        logger.info("=" * 80)
-        logger.info("🏭 AGGREGATED HANDLER - SINGLE WORKER PROCESSING")
-        logger.info("=" * 80)
-        logger.info("🔄 Processing both prefill and decode phases locally")
+        logger.debug("=" * 80)
+        logger.debug("🏭 AGGREGATED HANDLER - SINGLE WORKER PROCESSING")
+        logger.debug("=" * 80)
+        logger.debug("🔄 Processing both prefill and decode phases locally")
 
         # Implement all steps locally.
         async for res in self.generate_locally(request):
@@ -85,18 +85,18 @@ class PrefillHandler(HandlerBase):
 
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
-        logger.info("🔧 Initialized PrefillHandler")
-        logger.info(f"   ➜ Mode: {config.disaggregation_mode.value}")
-        logger.info(f"   ➜ Strategy: {config.disaggregation_strategy.value}")
-        logger.info(
+        logger.debug("🔧 Initialized PrefillHandler")
+        logger.debug(f"   ➜ Mode: {config.disaggregation_mode.value}")
+        logger.debug(f"   ➜ Strategy: {config.disaggregation_strategy.value}")
+        logger.debug(
             f"   ➜ Next client configured: {'Yes' if config.next_client else 'No'}"
         )
 
     async def remote_decode(self, request: dict):
-        logger.info("=" * 60)
-        logger.info("🌐 PREFILL → DECODE: REMOTE CALL")
-        logger.info("=" * 60)
-        logger.info("📡 Sending request to decode worker via round-robin")
+        logger.debug("=" * 60)
+        logger.debug("🌐 PREFILL → DECODE: REMOTE CALL")
+        logger.debug("=" * 60)
+        logger.debug("📡 Sending request to decode worker via round-robin")
         logger.debug(f"📦 Request keys being sent: {list(request.keys())}")
 
         decode_response_count = 0
@@ -106,16 +106,18 @@ class PrefillHandler(HandlerBase):
             logger.debug(f"📋 Decode response: {res.data()}")
             yield res.data()
 
-        logger.info(f"✅ Remote decode completed with {decode_response_count} responses")
+        logger.debug(
+            f"✅ Remote decode completed with {decode_response_count} responses"
+        )
 
     async def generate(self, request: dict):
-        logger.info("=" * 80)
-        logger.info("🎯 PREFILL HANDLER - CONTEXT PROCESSING")
-        logger.info("=" * 80)
-        logger.info(f"📋 Strategy: {self.disaggregation_strategy.value}")
+        logger.debug("=" * 80)
+        logger.debug("🎯 PREFILL HANDLER - CONTEXT PROCESSING")
+        logger.debug("=" * 80)
+        logger.debug(f"📋 Strategy: {self.disaggregation_strategy.value}")
 
         # Generate the prefill response locally
-        logger.info("🔄 Step 1: Processing prefill phase locally")
+        logger.debug("🔄 Step 1: Processing prefill phase locally")
         prefill_request = copy.deepcopy(request)
         prefill_response = None
         response_count = 0
@@ -128,25 +130,25 @@ class PrefillHandler(HandlerBase):
                 logger.error("❌ ERROR: Prefill should generate exactly one response")
                 raise ValueError("Prefill response should be generated only once.")
 
-        logger.info(f"✅ Prefill phase completed in {response_count} iteration(s)")
+        logger.debug(f"✅ Prefill phase completed in {response_count} iteration(s)")
 
         # Check for errors in prefill response
         is_error = self.check_error(prefill_response)
-        logger.info(f"🔍 Prefill error check: {'ERROR' if is_error else 'SUCCESS'}")
+        logger.debug(f"🔍 Prefill error check: {'ERROR' if is_error else 'SUCCESS'}")
 
         if (
             self.disaggregation_strategy == DisaggregationStrategy.PREFILL_FIRST
             and not is_error
         ):
-            logger.info("=" * 60)
-            logger.info("🚀 PREFILL_FIRST STRATEGY: Triggering decode worker")
-            logger.info("=" * 60)
-            logger.info("📦 Step 2: Transferring state to decode worker")
+            logger.debug("=" * 60)
+            logger.debug("🚀 PREFILL_FIRST STRATEGY: Triggering decode worker")
+            logger.debug("=" * 60)
+            logger.debug("📦 Step 2: Transferring state to decode worker")
 
             # If operating under prefill_first strategy, the prefill handler needs to trigger
             # the decode handler.
             if prefill_response is not None:
-                logger.info(
+                logger.debug(
                     "🔄 Adding disaggregated_params to request for decode worker"
                 )
                 request["disaggregated_params"] = prefill_response[
@@ -156,15 +158,15 @@ class PrefillHandler(HandlerBase):
                     f"📋 State transfer keys: {list(prefill_response['disaggregated_params'].keys())}"
                 )
 
-            logger.info("📡 Initiating remote decode call...")
+            logger.debug("📡 Initiating remote decode call...")
             async for res in self.remote_decode(request):
                 logger.debug("📤 Forwarding decode response to client")
                 yield res
         else:
-            logger.info("=" * 60)
-            logger.info("📤 DECODE_FIRST STRATEGY: Returning to decode worker")
-            logger.info("=" * 60)
-            logger.info(
+            logger.debug("=" * 60)
+            logger.debug("📤 DECODE_FIRST STRATEGY: Returning to decode worker")
+            logger.debug("=" * 60)
+            logger.debug(
                 "🔄 Sending prefill response back to decode worker for local processing"
             )
 
@@ -180,17 +182,17 @@ class DecodeHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
         logger.info("🔧 Initialized DecodeHandler")
-        logger.info(f"   ➜ Mode: {config.disaggregation_mode.value}")
-        logger.info(f"   ➜ Strategy: {config.disaggregation_strategy.value}")
-        logger.info(
+        logger.debug(f"   ➜ Mode: {config.disaggregation_mode.value}")
+        logger.debug(f"   ➜ Strategy: {config.disaggregation_strategy.value}")
+        logger.debug(
             f"   ➜ Next client configured: {'Yes' if config.next_client else 'No'}"
         )
 
     async def remote_prefill(self, request: dict):
-        logger.info("=" * 60)
-        logger.info("🌐 DECODE → PREFILL: REMOTE CALL")
-        logger.info("=" * 60)
-        logger.info("📡 Sending request to prefill worker via round-robin")
+        logger.debug("=" * 60)
+        logger.debug("🌐 DECODE → PREFILL: REMOTE CALL")
+        logger.debug("=" * 60)
+        logger.debug("📡 Sending request to prefill worker via round-robin")
         logger.debug(f"📦 Request keys being sent: {list(request.keys())}")
 
         prefill_response_count = 0
@@ -205,16 +207,16 @@ class DecodeHandler(HandlerBase):
         )
 
     async def generate(self, request: dict):
-        logger.info("=" * 80)
-        logger.info("🎯 DECODE HANDLER - TOKEN GENERATION")
-        logger.info("=" * 80)
-        logger.info(f"📋 Strategy: {self.disaggregation_strategy.value}")
+        logger.debug("=" * 80)
+        logger.debug("🎯 DECODE HANDLER - TOKEN GENERATION")
+        logger.debug("=" * 80)
+        logger.debug(f"📋 Strategy: {self.disaggregation_strategy.value}")
 
         if self.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST:
-            logger.info("=" * 60)
-            logger.info("🚀 DECODE_FIRST STRATEGY: Triggering prefill worker")
-            logger.info("=" * 60)
-            logger.info("🔄 Step 1: Requesting prefill processing from remote worker")
+            logger.debug("=" * 60)
+            logger.debug("🚀 DECODE_FIRST STRATEGY: Triggering prefill worker")
+            logger.debug("=" * 60)
+            logger.debug("🔄 Step 1: Requesting prefill processing from remote worker")
 
             prefill_response = None
             # If operating under decode_first strategy, the decode handler needs to trigger
@@ -232,7 +234,7 @@ class DecodeHandler(HandlerBase):
                     )
                     raise ValueError("Prefill response should be generated only once.")
 
-            logger.info(f"✅ Remote prefill completed in {response_count} iteration(s)")
+            logger.debug(f"✅ Remote prefill completed in {response_count} iteration(s)")
 
             response_data = (
                 prefill_response.data() if prefill_response is not None else None
@@ -241,7 +243,7 @@ class DecodeHandler(HandlerBase):
             # Check for errors in prefill response
             if prefill_response is not None:
                 is_error = self.check_error(response_data)
-                logger.info(
+                logger.debug(
                     f"🔍 Prefill error check: {'ERROR' if is_error else 'SUCCESS'}"
                 )
 
@@ -256,24 +258,26 @@ class DecodeHandler(HandlerBase):
                     return
 
             if prefill_response is not None and response_data is not None:
-                logger.info(
+                logger.debug(
                     "📦 Step 2: Extracting disaggregated_params from prefill response"
                 )
                 request["disaggregated_params"] = response_data["disaggregated_params"]
                 logger.debug(
                     f"📋 Received state keys: {list(response_data['disaggregated_params'].keys())}"
                 )
-                logger.info("✅ State successfully transferred from prefill worker")
+                logger.debug("✅ State successfully transferred from prefill worker")
         else:
-            logger.info("=" * 60)
-            logger.info("🔄 PREFILL_FIRST STRATEGY: Using existing state")
-            logger.info("=" * 60)
-            logger.info("📦 Disaggregated parameters should already be in request")
+            logger.debug("=" * 60)
+            logger.debug("🔄 PREFILL_FIRST STRATEGY: Using existing state")
+            logger.debug("=" * 60)
+            logger.debug("📦 Disaggregated parameters should already be in request")
 
-        logger.info("=" * 60)
-        logger.info("🏭 DECODE PROCESSING: Generating tokens locally")
-        logger.info("=" * 60)
-        logger.info("🔄 Step 3: Starting local decode generation with transferred state")
+        logger.debug("=" * 60)
+        logger.debug("🏭 DECODE PROCESSING: Generating tokens locally")
+        logger.debug("=" * 60)
+        logger.debug(
+            "🔄 Step 3: Starting local decode generation with transferred state"
+        )
 
         async for res in self.generate_locally(request):
             logger.debug("📤 Yielding decode response to client")
