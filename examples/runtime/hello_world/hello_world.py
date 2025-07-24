@@ -23,19 +23,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 logger = logging.getLogger(__name__)
-configure_dynamo_logging(service_name="HelloWorld")
-
-
-"""
-Pipeline Architecture:
-
-Users/Clients (HTTP)
-      │
-      ▼
-┌─────────────┐
-│  Frontend   │  HTTP API endpoint (/generate)
-└─────────────┘
-"""
+configure_dynamo_logging(service_name="backend")
 
 
 @dynamo_endpoint(str, str)
@@ -48,41 +36,22 @@ async def content_generator(request: str):
 
 @dynamo_worker()
 async def worker(runtime: DistributedRuntime):
-    logger.info(
-        f"Primary lease ID: {runtime.etcd_client().primary_lease_id()}/{runtime.etcd_client().primary_lease_id():#x}"
-    )
-    logger.info(f"Starting worker {runtime.worker_id()}")
+    namespace_name = "hello_world"
+    component_name = "backend"
+    endpoint_name = "generate"
+    lease_id = runtime.etcd_client().primary_lease_id()
 
-    component = runtime.namespace("hello_world").component("backend")
+    component = runtime.namespace(namespace_name).component(component_name)
     await component.create_service()
 
-    endpoint = component.endpoint("generate")
+    logger.info(f"Created service {namespace_name}/{component_name}")
+
+    endpoint = component.endpoint(endpoint_name)
+
+    logger.info(f"Serving endpoint {endpoint_name} on lease {lease_id}")
     await endpoint.serve_endpoint(content_generator)
 
 
 if __name__ == "__main__":
     uvloop.install()
     asyncio.run(worker())
-
-# @service(
-#     dynamo={"namespace": "hello_world"},
-# )
-# class Frontend:
-#     """A simple frontend HTTP API that forwards requests to the dynamo graph."""
-
-#     def __init__(self) -> None:
-#         # Configure logging
-#         configure_dynamo_logging(service_name="Frontend")
-
-#     # alternative syntax: @endpoint(transports=[DynamoTransport.HTTP])
-#     @api()
-#     async def generate(self, request: RequestType):
-#         """Stream results from the pipeline."""
-#         logger.info(f"Frontend received: {request.text}")
-
-#         def content_generator():
-#             for word in request.text.split(","):
-#                 time.sleep(1)
-#                 yield f"Hello {word}!\n"
-
-#         return StreamingResponse(content_generator())
