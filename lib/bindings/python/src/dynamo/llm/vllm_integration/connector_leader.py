@@ -115,7 +115,10 @@ class KvConnectorLeader(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        self.connector.update_state_after_alloc(request.request_id)
+        block_ids = [block.block_id for block in blocks]
+        self.connector.update_state_after_alloc(
+            request.request_id, block_ids, num_external_tokens
+        )
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

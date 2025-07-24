@@ -65,6 +65,8 @@ pub enum OwnedBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
     for OwnedBlock<S, L, M>
 {
+    type ResultType = Option<Block<S, L, M>>;
+
     fn is_returnable(&self) -> bool {
         match self {
             OwnedBlock::Mutable(block) => block.is_returnable(),
@@ -72,9 +74,9 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, 
         }
     }
 
-    fn try_take_block(self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>> {
+    fn try_take_block(&mut self, token: private::PrivateToken) -> Option<Block<S, L, M>> {
         match self {
-            OwnedBlock::Mutable(block) => block.try_take_block(token),
+            OwnedBlock::Mutable(block) => Some(block.try_take_block(token)),
             OwnedBlock::Immutable(block) => block.try_take_block(token),
         }
     }
@@ -127,6 +129,119 @@ pub enum BlockPoolError {
 
     #[error("No blocks to register")]
     NoBlocksToRegister,
+
+    #[error("Registration failed: {0}")]
+    RegistrationFailed(String),
+
+    #[error("Retry match for SequenceHash: {0}")]
+    RetryMatchHash(SequenceHash),
+}
+
+pub type PoolRegisterBlockError<S, L, M> = EitherErrorOrRetry<MutableBlock<S, L, M>>;
+pub type PoolRegisterBlocksError = EitherErrorOrRetry<usize>;
+pub type PoolMatchHashError = EitherErrorOrRetry<SequenceHash>;
+pub type PoolMatchHashesError = EitherErrorOrRetry<usize>;
+
+#[derive(Debug, Dissolve, thiserror::Error)]
+pub struct EitherErrorOrRetry<E>(either::Either<BlockPoolError, E>);
+
+impl<E> EitherErrorOrRetry<E> {
+    pub fn error(error: BlockPoolError) -> Self {
+        Self(either::Either::Left(error))
+    }
+
+    pub fn retry(partial: E) -> Self {
+        Self(either::Either::Right(partial))
+    }
+
+    pub fn retry_or_err(self) -> Result<E, BlockPoolError> {
+        match self {
+            Self(either::Either::Left(error)) => Err(error),
+            Self(either::Either::Right(partial)) => Ok(partial),
+        }
+    }
+}
+
+impl<E> From<BlockPoolError> for EitherErrorOrRetry<E> {
+    fn from(error: BlockPoolError) -> Self {
+        Self::error(error)
+    }
+}
+
+impl<E> From<BlockError> for EitherErrorOrRetry<E> {
+    fn from(error: BlockError) -> Self {
+        Self::error(error.into())
+    }
+}
+
+#[derive(Debug, Dissolve)]
+pub struct PartialRegistrationResult<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    pub registered: Vec<ImmutableBlock<S, L, M>>,
+    pub remaining: Vec<MutableBlock<S, L, M>>,
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> PartialRegistrationResult<S, L, M> {
+    pub fn wait_for_block(block: MutableBlock<S, L, M>) -> Self {
+        Self {
+            registered: vec![],
+            remaining: vec![block],
+        }
+    }
+
+    pub fn extend(
+        &mut self,
+        immutable: Vec<ImmutableBlock<S, L, M>>,
+        remaining: Vec<MutableBlock<S, L, M>>,
+    ) {
+        self.registered.extend(immutable);
+        self.remaining.extend(remaining);
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Display
+    for PartialRegistrationResult<S, L, M>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RetryRegistration Error: registered: {}, remaining: {}",
+            self.registered.len(),
+            self.remaining.len()
+        )
+    }
+}
+
+#[derive(Debug, Dissolve)]
+pub struct PartialMatchResult<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    pub matched: Vec<ImmutableBlock<S, L, M>>,
+    pub remaining: Vec<SequenceHash>,
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> PartialMatchResult<S, L, M> {
+    pub fn wait_for_block(sequence_hash: SequenceHash) -> Self {
+        Self {
+            matched: vec![],
+            remaining: vec![sequence_hash],
+        }
+    }
+
+    pub fn extend(&mut self, matched: Vec<ImmutableBlock<S, L, M>>, remaining: Vec<SequenceHash>) {
+        self.matched.extend(matched);
+        self.remaining.extend(remaining);
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Display
+    for PartialMatchResult<S, L, M>
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "RetryMatch Error: matched: {}, remaining: {}",
+            self.matched.len(),
+            self.remaining.len()
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

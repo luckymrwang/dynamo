@@ -115,6 +115,8 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
 /// If the block is droppable, it will be returned to the pool.
 /// If the block is not droppable, it will be kept alive until the pool is reset.
 pub trait MaybeReturnableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    type ResultType;
+
     /// At the time of the call, the block is singularly owned and therefore will be returned to the pool
     /// if dropped.
     fn is_returnable(&self) -> bool;
@@ -123,7 +125,7 @@ pub trait MaybeReturnableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata
     ///
     /// This is an internal function guarded by the PrivateToken and is used to implement the public facing
     /// [`super::pool::BlockPool::return_block`] and [`super::pool::BlockPool::return_block_blocking`] functions.
-    fn try_take_block(self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>>;
+    fn try_take_block(&mut self, token: private::PrivateToken) -> Self::ResultType;
 }
 
 /// Marker trait for types that are mutable blocks
@@ -198,6 +200,7 @@ pub struct Block<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     metadata: M,
     state: BlockState,
     manager: Option<Arc<BlockManager<L, M>>>,
+    duplicate: Option<Arc<MutableBlock<S, L, M>>>,
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
@@ -208,7 +211,16 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
             metadata,
             state: BlockState::Reset,
             manager: None,
+            duplicate: None,
         })
+    }
+
+    pub fn is_duplicate(&self) -> bool {
+        self.duplicate.is_some()
+    }
+
+    pub(crate) fn set_duplicate(&mut self, duplicate: Arc<MutableBlock<S, L, M>>) {
+        self.duplicate = Some(duplicate);
     }
 
     pub fn sequence_hash(&self) -> Result<SequenceHash, BlockError> {
@@ -235,6 +247,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
     pub fn reset(&mut self) {
         self.state = BlockState::Reset;
         self.metadata.reset_metadata();
+        self.duplicate = None;
     }
 
     /// Initialize a sequence on the block using a [SaltHash]
@@ -752,19 +765,20 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> IntoReadableBlocks<L, M>
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
     for MutableBlock<S, L, M>
 {
+    type ResultType = Block<S, L, M>;
+
     fn is_returnable(&self) -> bool {
-        self.block.is_some()
+        true
     }
 
-    fn try_take_block(mut self, _: private::PrivateToken) -> Option<Vec<Block<S, L, M>>> {
-        self.block.take().map(|block| vec![block])
+    fn try_take_block(&mut self, _: private::PrivateToken) -> Self::ResultType {
+        self.block.take().expect("block was dropped")
     }
 }
 
 pub struct ImmutableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
-    block: Arc<MutableBlock<S, L, M>>,
+    block: Option<Arc<MutableBlock<S, L, M>>>,
     sequence_hash: SequenceHash,
-    duplicate: Option<Arc<MutableBlock<S, L, M>>>,
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Debug
@@ -775,6 +789,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Debug
             f,
             "ImmutableBlock(storage: {:?}, block_id: {}, sequence_hash: {})",
             self.block
+                .as_ref()
+                .expect("block was dropped")
                 .block
                 .as_ref()
                 .expect("block was dropped")
@@ -793,7 +809,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for ImmutableBlock
         Self {
             block: self.block.clone(),
             sequence_hash: self.sequence_hash,
-            duplicate: self.duplicate.clone(),
         }
     }
 }
@@ -802,28 +817,49 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
     pub(crate) fn new(block: Arc<MutableBlock<S, L, M>>) -> Self {
         let sequence_hash = block.sequence_hash().expect("block is in the wrong state");
         Self {
-            block,
+            block: Some(block),
             sequence_hash,
-            duplicate: None,
         }
     }
 
-    /// Attempts to add a duplicate block to the ImmutableBlock.
-    pub(crate) fn with_duplicate(
-        self,
-        duplicate: Arc<MutableBlock<S, L, M>>,
+    pub(crate) fn from_duplicate(
+        mut block: MutableBlock<S, L, M>,
+        duplicate: ImmutableBlock<S, L, M>,
     ) -> Result<Self, BlockError> {
-        if self.duplicate.is_some() {
-            return Err(BlockError::IncompatibleImmutableBlock);
+        // validate block state and sequence hash match
+        match block.state() {
+            BlockState::Complete(state) => {
+                let sequence_hash = state.token_block().sequence_hash();
+                if sequence_hash != duplicate.sequence_hash {
+                    return Err(BlockError::InvalidState(
+                        "duplicate blocks must have the same sequence hash".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(BlockError::InvalidState(
+                    "duplicate blocks must be in the complete state".to_string(),
+                ));
+            }
         }
+
+        if block.is_duplicate() {
+            return Err(BlockError::InvalidState(
+                "duplicate blocks must not be a duplicate".to_string(),
+            ));
+        }
+
+        block.set_duplicate(duplicate.mutable_block().clone());
+
         Ok(Self {
-            duplicate: Some(duplicate),
-            ..self
+            block: Some(Arc::new(block)),
+            sequence_hash: duplicate.sequence_hash,
         })
     }
 
+    #[inline(always)]
     pub(crate) fn mutable_block(&self) -> &Arc<MutableBlock<S, L, M>> {
-        &self.block
+        self.block.as_ref().expect("block was dropped")
     }
 
     pub fn sequence_hash(&self) -> SequenceHash {
@@ -833,15 +869,13 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
     /// If the ImmutableBlock is a duplicate, returns the block ID of the duplicate;
     /// otherwise, returns the block ID of the primary block.
     pub fn block_id(&self) -> BlockId {
-        self.duplicate
-            .as_ref()
-            .map_or(self.block.block_id(), |duplicate| duplicate.block_id())
+        self.mutable_block().block_id()
     }
 
     /// Returns true if the ImmutableBlock holds a duplicate block.
     #[allow(unused)]
     pub(crate) fn is_duplicate(&self) -> bool {
-        self.duplicate.is_some()
+        self.mutable_block().is_duplicate()
     }
 }
 
@@ -857,7 +891,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider
     type Locality = L;
 
     fn block_data(&self) -> &impl BlockDataExt<S> {
-        &self.block.block.as_ref().expect("block was dropped").data
+        &self.block.as_ref().expect("block was dropped").data
     }
 }
 
@@ -869,6 +903,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Deref for ImmutableBlock
     fn deref(&self) -> &Self::Target {
         self.block
             .as_ref()
+            .expect("block was dropped")
             .block
             .as_ref()
             .expect("block was dropped")
@@ -904,9 +939,9 @@ impl<'a, S: Storage + 'a, L: LocalityProvider + 'a, M: BlockMetadata>
 }
 
 impl<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> {
-    pub async fn enqueue_offload(&self, priority: u64) -> Result<()> {
+    pub fn enqueue_offload(&self, priority: u64) -> Result<()> {
         if let Some(manager) = self.manager() {
-            manager.enqueue_offload_block(self, priority).await?;
+            manager.enqueue_offload_block(self, priority)?;
         } else {
             tracing::warn!("Block is not managed. Unable to enqueue offload.");
         }
@@ -917,34 +952,20 @@ impl<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata> ImmutableBlock
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
     for ImmutableBlock<S, L, M>
 {
+    type ResultType = Option<Block<S, L, M>>;
+
     fn is_returnable(&self) -> bool {
-        // determine if the arc use count is 1; if duplicate, evaluate that arc, otherwise evaluate the primary
-        match &self.duplicate {
-            Some(duplicate) => Arc::strong_count(duplicate) == 1,
-            None => Arc::strong_count(&self.block) == 1,
-        }
+        self.block
+            .as_ref()
+            .expect("block was dropped")
+            .is_returnable()
     }
 
-    fn try_take_block(mut self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>> {
-        let blocks = [
-            Arc::try_unwrap(self.block).ok(),
-            self.duplicate
-                .take()
-                .and_then(|duplicate| Arc::try_unwrap(duplicate).ok()),
-        ];
-
-        let blocks = blocks
-            .into_iter()
-            .flatten()
-            .filter_map(|block| block.try_take_block(token))
-            .flatten()
-            .collect::<Vec<_>>();
-
-        if blocks.is_empty() {
-            None
-        } else {
-            Some(blocks)
-        }
+    fn try_take_block(&mut self, token: private::PrivateToken) -> Self::ResultType {
+        self.block
+            .take()
+            .and_then(|block| Arc::try_unwrap(block).ok())
+            .map(|mut block| block.try_take_block(token))
     }
 }
 
