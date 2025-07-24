@@ -33,42 +33,52 @@ Client (dynamo_worker)
 ## Components
 
 - **Backend**: A Dynamo service with an endpoint that receives text input and streams back greetings for each comma-separated word
-- **Client**: A Dynamo worker that connects to the backend service and processes streaming responses
+- **Client**: A Dynamo worker that connects to and sends requests to the backend service, then prints out the response
 
 ## Implementation Details
 
 The example demonstrates:
 
-1. **Endpoint Definition**: Using the `@dynamo_endpoint` decorator to create streaming endpoints
-2. **Worker Setup**: Using the `@dynamo_worker()` decorator to create distributed runtime workers
-3. **Service Creation**: Creating services and endpoints using the distributed runtime API
-4. **Streaming Responses**: Yielding data for real-time streaming
-5. **Client Integration**: Connecting to services and processing streams
-6. **Logging**: Basic logging configuration with `configure_dynamo_logging`
+- **Endpoint Definition**: Using the `@dynamo_endpoint` decorator to create streaming endpoints
+- **Worker Setup**: Using the `@dynamo_worker()` decorator to create distributed runtime workers
+- **Service Creation**: Creating services and endpoints using the distributed runtime API
+- **Streaming Responses**: Yielding data for real-time streaming
+- **Client Integration**: Connecting to services and processing streams
+- **Logging**: Basic logging configuration with `configure_dynamo_logging`
 
 ## Getting Started
 
-### Prerequisites
+## Prerequisites
 
-```{note}
-Make sure that `etcd` and `nats` are running
-```
+ Before running this example, ensure you have the following services running:
+
+ - **etcd**: A distributed key-value store used for service discovery and metadata storage
+ - **NATS**: A high-performance message broker for inter-component communication
+
+ You can start these services using Docker Compose:
+
+ ```bash
+ # clone the dynamo repository if necessary
+ # git clone https://github.com/ai-dynamo/dynamo.git
+ cd dynamo
+ docker compose -f deploy/metrics/docker-compose.yml up -d
+ ```
 
 ### Running the Example
 
-1. Start the backend service:
+First, start the backend service:
 ```bash
 cd examples/runtime/hello_world
 python hello_world.py
 ```
 
-2. In a separate terminal, run the client:
+Second, in a separate terminal, run the client:
 ```bash
 cd examples/runtime/hello_world
 python client.py
 ```
 
-The client will connect to the backend service and stream the results.
+The client will connect to the backend service and print the streaming results.
 
 ### Expected Output
 
@@ -91,12 +101,3 @@ Hello star!
 
 - **`worker`**: A dynamo worker that connects to the backend service and processes the streaming response
 
-## Next Steps
-
-After understanding this basic example, explore:
-
-```{seealso}
-- [Hello World Configurable](../hello_world_configurable/README.md): Add configuration to your services
-- [Simple Pipeline](../simple_pipeline/README.md): Connect multiple services together
-- [Multistage Pipeline](../multistage_pipeline/README.md): Build complex multi-stage processing pipelines
-```

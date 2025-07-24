@@ -33,8 +33,8 @@ async def worker(runtime: DistributedRuntime):
 
     # Issue request and process the stream
     stream = await client.generate("world,sun,moon,star")
-    async for char in stream:
-        print(char)
+    async for response in stream:
+        print(response.data())
 
 
 if __name__ == "__main__":
