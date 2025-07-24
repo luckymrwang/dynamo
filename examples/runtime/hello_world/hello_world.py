@@ -15,7 +15,6 @@
 
 import asyncio
 import logging
-import time
 
 import uvloop
 
@@ -30,7 +29,7 @@ configure_dynamo_logging(service_name="backend")
 async def content_generator(request: str):
     logger.info(f"Received request: {request}")
     for word in request.split(","):
-        time.sleep(1)
+        await asyncio.sleep(1)
         yield f"Hello {word}!"
 
 

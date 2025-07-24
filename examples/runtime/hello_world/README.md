@@ -21,7 +21,7 @@ This is the simplest Dynamo example demonstrating a basic service using Dynamo's
 
 ## Architecture
 
-```
+```text
 Client (dynamo_worker)
       │
       ▼
@@ -83,7 +83,7 @@ The client will connect to the backend service and print the streaming results.
 ### Expected Output
 
 When running the client, you should see streaming output like:
-```
+```text
 Hello world!
 Hello sun!
 Hello moon!
