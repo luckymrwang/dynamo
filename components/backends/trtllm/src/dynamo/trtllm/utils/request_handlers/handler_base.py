@@ -235,14 +235,6 @@ class HandlerBase:
             logger.info(f"   ➜ Setting max_tokens: {max_tokens}")
             sampling_params.max_tokens = max_tokens
 
-        ignore_eos = request["stop_conditions"]["ignore_eos"]
-        if ignore_eos:
-            sampling_params.ignore_eos = ignore_eos
-
-        min_tokens = request["stop_conditions"]["min_tokens"]
-        if min_tokens:
-            sampling_params.min_tokens = min_tokens
-
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
         streaming = (
@@ -266,13 +258,6 @@ class HandlerBase:
         model_name = request.get("model", "unknown_model")
 
         # NEW: Updated engine call to include multimodal data
-        sampling_params.end_id = None
-        sampling_params.pad_id = None
-        sampling_params.skip_special_tokens = True
-        sampling_params.add_special_tokens = True
-        sampling_params.spaces_between_special_tokens = True
-        sampling_params.stop_token_ids = None
-        sampling_params.logprobs = False
         async for res in self.engine.llm.generate_async(
             inputs=processed_input,  # Use the correctly extracted inputs
             sampling_params=sampling_params,
