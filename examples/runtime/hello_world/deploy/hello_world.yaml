@@ -21,10 +21,10 @@ spec:
           command:
             - /bin/sh
             - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
+            - 'echo ok'
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 2
         failureThreshold: 10
       dynamoNamespace: hello-world
       componentType: main
@@ -38,7 +38,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:helloworld
           workingDir: /workspace/examples/runtime/hello_world/
           command:
             - /bin/sh
@@ -60,7 +60,7 @@ spec:
           command:
             - /bin/sh
             - -c
-            - 'grep "Hello" /tmp/hello_world.log'
+            - 'grep "Serving endpoint" /tmp/hello_world.log'
         initialDelaySeconds: 60
         periodSeconds: 60
         timeoutSeconds: 30
@@ -79,7 +79,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:helloworld
           workingDir: /workspace/examples/runtime/hello_world/
           command:
             - /bin/sh

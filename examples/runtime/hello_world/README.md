@@ -111,3 +111,9 @@ export NAMESPACE=<your-namespace>
 cd dynamo
 kubectl apply -f examples/runtime/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
 ```
+
+to delete your deployment issue:
+
+```bash
+kubectl delete dynamographdeployment hello-world -n ${NAMESPACE}
+```
