@@ -470,6 +470,16 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
     /// Returns a block to the inactive pool
     pub fn return_block(&mut self, mut block: Block<S, L, M>) {
+        if let Some(registered_block) = block.detach_registered_block() {
+            if let Some(mut raw) = Arc::try_unwrap(registered_block)
+                .ok()
+                .map(|mut b| b.try_take_block(private::PrivateToken))
+            {
+                self.active.remove(&mut raw);
+                self.inactive.return_block(raw);
+            }
+        }
+
         self.active.remove(&mut block);
         self.inactive.return_block(block);
     }

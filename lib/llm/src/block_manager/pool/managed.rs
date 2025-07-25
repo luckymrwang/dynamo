@@ -1228,7 +1228,10 @@ mod tests {
         // This will take ownership of the block and return an immutable block
         let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
         let block = immutable_blocks.pop().unwrap();
-        assert!(block.state().is_registered());
+        assert!(
+            (block.is_duplicate() && !block.state().is_registered())
+                || (!block.is_duplicate() && block.state().is_registered())
+        );
         assert_eq!(block.sequence_hash(), sequence_hash);
 
         block

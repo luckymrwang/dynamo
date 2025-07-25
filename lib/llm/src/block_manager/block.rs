@@ -227,6 +227,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
         self.registered_block = Some(primary_block);
     }
 
+    pub(crate) fn detach_registered_block(&mut self) -> Option<Arc<MutableBlock<S, L, M>>> {
+        self.registered_block.take()
+    }
+
     pub fn sequence_hash(&self) -> Result<SequenceHash, BlockError> {
         match self.state() {
             BlockState::Complete(state) => Ok(state.token_block().sequence_hash()),
