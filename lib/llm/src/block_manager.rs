@@ -110,18 +110,6 @@ pub struct KvBlockManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     block_size: usize,
 }
 
-impl<Locality: LocalityProvider, Metadata: BlockMetadata> Clone
-    for KvBlockManager<Locality, Metadata>
-{
-    fn clone(&self) -> Self {
-        Self {
-            state: self.state.clone(),
-            _cancellation_token: self._cancellation_token.clone(),
-            block_size: self.block_size,
-        }
-    }
-}
-
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Locality, Metadata> {
     /// Get the block size
     pub fn block_size(&self) -> usize {
@@ -168,6 +156,11 @@ fn build_cancel_token(config: &mut KvBlockManagerConfig) -> Arc<CancelOnLastDrop
 
     Arc::new(CancelOnLastDrop { cancellation_token })
 }
+
+// Local Specific Implementation
+//
+// When Locality is Local, then we have direct access within the calling process to the memory
+// assocated with the blocks.
 
 impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
     /// Create a new [KvBlockManager]
@@ -237,6 +230,18 @@ impl<R: LogicalResources, Metadata: BlockMetadata> KvBlockManager<locality::Logi
             _cancellation_token,
             block_size,
         })
+    }
+}
+
+impl<Locality: LocalityProvider, Metadata: BlockMetadata> Clone
+    for KvBlockManager<Locality, Metadata>
+{
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            _cancellation_token: self._cancellation_token.clone(),
+            block_size: self.block_size,
+        }
     }
 }
 
