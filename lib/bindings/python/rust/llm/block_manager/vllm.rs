@@ -29,7 +29,6 @@ use crate::llm::block_manager::VllmBlockManager;
 use crate::to_pyerr;
 
 mod block_list;
-mod connector;
 mod request;
 mod slot;
 
