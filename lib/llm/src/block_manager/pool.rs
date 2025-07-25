@@ -132,9 +132,6 @@ pub enum BlockPoolError {
 
     #[error("Registration failed: {0}")]
     RegistrationFailed(String),
-
-    #[error("Retry match for SequenceHash: {0}")]
-    RetryMatchHash(SequenceHash),
 }
 
 pub type PoolRegisterBlockError<S, L, M> = EitherErrorOrRetry<MutableBlock<S, L, M>>;
