@@ -200,7 +200,9 @@ pub struct Block<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     metadata: M,
     state: BlockState,
     manager: Option<Arc<BlockManager<L, M>>>,
-    duplicate: Option<Arc<MutableBlock<S, L, M>>>,
+
+    // if this is some then the current block is a duplicate
+    registered_block: Option<Arc<MutableBlock<S, L, M>>>,
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
@@ -211,16 +213,18 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
             metadata,
             state: BlockState::Reset,
             manager: None,
-            duplicate: None,
+            registered_block: None,
         })
     }
 
     pub fn is_duplicate(&self) -> bool {
-        self.duplicate.is_some()
+        self.registered_block.is_some()
     }
 
-    pub(crate) fn set_duplicate(&mut self, duplicate: Arc<MutableBlock<S, L, M>>) {
-        self.duplicate = Some(duplicate);
+    /// Marking this block as a duplicate means that it can not be registered; however, it can carry with
+    /// it a strong reference to the primary block which which it duplicates kv information.
+    pub(crate) fn mark_as_duplicate(&mut self, primary_block: Arc<MutableBlock<S, L, M>>) {
+        self.registered_block = Some(primary_block);
     }
 
     pub fn sequence_hash(&self) -> Result<SequenceHash, BlockError> {
@@ -247,7 +251,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
     pub fn reset(&mut self) {
         self.state = BlockState::Reset;
         self.metadata.reset_metadata();
-        self.duplicate = None;
+        self.registered_block = None;
     }
 
     /// Initialize a sequence on the block using a [SaltHash]
@@ -822,15 +826,15 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
         }
     }
 
-    pub(crate) fn from_duplicate(
+    pub(crate) fn make_duplicate(
         mut block: MutableBlock<S, L, M>,
-        duplicate: ImmutableBlock<S, L, M>,
+        primary_block: ImmutableBlock<S, L, M>,
     ) -> Result<Self, BlockError> {
         // validate block state and sequence hash match
         match block.state() {
             BlockState::Complete(state) => {
                 let sequence_hash = state.token_block().sequence_hash();
-                if sequence_hash != duplicate.sequence_hash {
+                if sequence_hash != primary_block.sequence_hash {
                     return Err(BlockError::InvalidState(
                         "duplicate blocks must have the same sequence hash".to_string(),
                     ));
@@ -849,11 +853,11 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
             ));
         }
 
-        block.set_duplicate(duplicate.mutable_block().clone());
+        block.mark_as_duplicate(primary_block.mutable_block().clone());
 
         Ok(Self {
             block: Some(Arc::new(block)),
-            sequence_hash: duplicate.sequence_hash,
+            sequence_hash: primary_block.sequence_hash,
         })
     }
 

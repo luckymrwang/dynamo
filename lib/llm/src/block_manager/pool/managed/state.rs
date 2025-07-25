@@ -296,7 +296,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
             match self.default_duplication_setting {
                 BlockRegistrationDuplicationSetting::Allowed => {
-                    return Ok((ImmutableBlock::from_duplicate(block, immutable)?, None));
+                    return Ok((ImmutableBlock::make_duplicate(block, immutable)?, None));
                 }
                 BlockRegistrationDuplicationSetting::Disabled => {
                     // immediate return the block to the pool if duplicates are disabled
@@ -313,7 +313,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             let primary = self
                 .active
                 .register(MutableBlock::new(raw_block, self.return_tx.clone()))?;
-            return Ok((ImmutableBlock::from_duplicate(block, primary)?, None));
+            return Ok((ImmutableBlock::make_duplicate(block, primary)?, None));
         }
 
         // Attempt to register the block
