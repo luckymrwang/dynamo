@@ -137,6 +137,9 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
     }
 
     /// Onboard a set of blocks to the device pool
+    ///
+    /// The return value is a [`oneshot::Receiver`] meaning it can be `await`'ed in an async
+    /// environment or it can be blocking via [`oneshot::Receiver::blocking_recv`].
     pub fn onboard_blocks<S: Storage>(
         &self,
         blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
