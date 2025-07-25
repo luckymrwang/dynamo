@@ -46,6 +46,9 @@ dependencies = [
     "types-tabulate",
     "transformers",
     "pytest-mypy",
+    "types-networkx",
+    "pandas-stubs",
+    "types-seaborn"
 ]
 
 [project.scripts]
