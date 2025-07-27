@@ -24,10 +24,11 @@ data:
                   domains: ["*"]
                   routes:
                   - match:
-                      prefix: "/"
+                      prefix: "/preproc"
                     route:
                       cluster: dynamo-frontend
                       host_rewrite_header: x-gateway-destination-endpoint
+                      auto_host_rewrite: true
                       timeout: 300s
               http_filters:
               - name: envoy.filters.http.ext_proc
@@ -52,7 +53,7 @@ data:
             - endpoint:
                 address:
                   socket_address:
-                    address: dummy.default.svc.cluster.local  # Dummy, will be overwritten via host header
+                    address: placeholder.default.svc.cluster.local  # Overwritten by host_rewrite_header
                     port_value: 8080
 
       - name: epp-cluster

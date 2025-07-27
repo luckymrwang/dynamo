@@ -10,10 +10,7 @@ spec:
   - matches:
     - path:
         type: PathPrefix
-        value: /v1
-      headers:
-        - name: x-routing-request
-          value: "true"
+        value: /preproc
     backendRefs:
     - name: envoy-shim
       port: 80
