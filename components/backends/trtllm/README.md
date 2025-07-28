@@ -201,6 +201,59 @@ DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
 
 Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-tranfer.md).
 
+## Using Pre-computed Embeddings (Experimental)
+
+Dynamo with TensorRT-LLM supports providing pre-computed embeddings directly in an inference request. This bypasses the need for the model to process an image and generate embeddings itself, which is useful for performance optimization or when working with custom, pre-generated embeddings.
+
+### Enabling the Feature
+
+This is an experimental feature that requires a small patch to your local TensorRT-LLM installation.
+
+1.  **Apply Patches:** You will need to apply two patches to the TensorRT-LLM Python files. These patches enable the `default_multimodal_input_loader` to accept pre-computed embeddings.
+    *   Patch 1: [`302b73b`](https://github.com/chang-l/TensorRT-LLM/commit/302b73be5108f58a6795075e5231a31872e42ddd)
+    *   Patch 2: [`5b7613b`](https://github.com/chang-l/TensorRT-LLM/commit/5b7613bbc78d830efb7c320a3090c3ef862aa0ab)
+
+    > **Note:** These changes are to Python files only and **do not** require you to recompile TensorRT-LLM. You can apply them by simply replacing the relevant files in your installation.
+
+### How to Use
+
+Once the patches are applied, you can send requests with paths to local embedding files.
+
+-   **Format:** Provide the embedding as part of the `messages` array, using the `image_url` content type.
+-   **URL:** The `url` field should contain the absolute or relative path to your embedding file on the local filesystem.
+-   **File Types:** Supported embedding file extensions are `.pt`, `.pth`, and `.bin`. Dynamo will automatically detect these extensions.
+
+When a request with a supported embedding file is received, Dynamo will load the tensor from the file and pass it directly to the model for inference, skipping the image-to-embedding pipeline.
+
+### Example Request
+
+Here is an example of how to send a request with a pre-computed embedding file.
+
+```bash
+curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+    "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Describe the content represented by the embeddings"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "/path/to/your/embedding.pt"
+                    }
+                }
+            ]
+        }
+    ],
+    "stream": false,
+    "max_tokens": 160
+}'
+```
+
 ## Supported Multimodal Models
 
 Multimodel models listed [here](https://github.com/NVIDIA/TensorRT-LLM/blob/v1.0.0rc0/examples/pytorch/README.md) are supported by dynamo.
