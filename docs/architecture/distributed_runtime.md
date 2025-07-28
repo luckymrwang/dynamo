@@ -28,14 +28,6 @@ Dynamo `DistributedRuntime` is the core infrastructure in dynamo that enables di
 
 While theoretically each `DistributedRuntime` can have multiple `Namespace`s as long as their names are unique (similar logic also applies to `Component/Namespace` and `Endpoint/Component`), in practice, each dynamo components typically are deployed with its own process and thus has its own `DistributedRuntime` object. However, they share the same namespace to discover each other.
 
-For example, the deployment configuration `examples/llm/configs/disagg.yaml` have four workers:
-
-- `Frontend`: Start an HTTP server and register a `chat/completions` endpoint. The HTTP server route the request to the `Processor`.
-- `Processor`: When a new request arrives, `Processor` applies the chat template and perform the tokenization. Then, it route the request to the `VllmWorker`.
-- `VllmWorker` and `PrefillWorker`: Perform the actual decode and prefill computation.
-
-Since the four workers are deployed in different processes, each of them have their own `DistributedRuntime`. Within their own `DistributedRuntime`, they all have their own `Namespace`s named `dynamo`. Then, under their own `dynamo` namespace, they have their own `Component`s named `Frontend/Processor/VllmWorker/PrefillWorker`. Lastly, for the `Endpoint`, `Frontend` has no `Endpoints`, `Processor` and `VllmWorker` each has a `generate` endpoint, and `PrefillWorker` has a placeholder `mock` endpoint. Their `DistributedRuntime`s and `Namespace`s are set in the `@service` decorators in `examples/llm/components/<frontend/processor/worker/prefill_worker>.py`. Their `Component`s are set by their name in `/deploy/dynamo/sdk/src/dynamo/sdk/cli/serve_dynamo.py`. Their `Endpoint`s are set by the `@endpoint` decorators in `examples/llm/components/<frontend/processor/worker/prefill_worker>.py`.
-
 ## Initialization
 
 In this section, we explain what happens under the hood when `DistributedRuntime/Namespace/Component/Endpoint` objects are created. There are two modes for `DistributedRuntime` initialization: dynamic and static. In static mode, components and endpoints are defined using known addresses and do not change during runtime. In dynamic modes, components and endpoints are discovered through the network and can change during runtime. We focus on the dynamic mode in the rest of this document. Static mode is basically dynamic mode without registration and discovery and hence does not rely on etcd.
@@ -74,7 +66,7 @@ After selecting which endpoint to hit, the `Client` sends the serialized request
 We provide native rust and python (through binding) examples for basic usage of `DistributedRuntime`:
 
 - Rust: `/lib/runtime/examples/`
-- Python: `/lib/bindings/python/examples/`. We also provide a complete example of using `DistributedRuntime` for communication and Dynamo's LLM library for prompt templates and (de)tokenization to deploy a vllm-based service. Please refer to `lib/bindings/python/examples/hello_world/server_vllm.py` for details.
+- Python: `/examples/runtime/hello_world`
 
 ```{note}
 Building a vLLM docker image for ARM machines currently involves building vLLM from source, which is known to be slow and requires extensive system RAM; see [vLLM Issue 8878](https://github.com/vllm-project/vllm/issues/8878).
