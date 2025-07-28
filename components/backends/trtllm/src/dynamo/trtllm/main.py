@@ -12,19 +12,16 @@ from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from transformers import AutoConfig
 
-from dynamo.llm import (
-    ModelType,
-    get_tensorrtllm_engine,
-    get_tensorrtllm_publisher,
-    register_llm,
-)
+from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.utils.multimodal_processor import MultimodalRequestProcessor
-from dynamo.trtllm.utils.request_handlers.handlers import (
+from dynamo.trtllm.engine import get_llm_engine
+from dynamo.trtllm.publisher import get_publisher
+from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
+from dynamo.trtllm.utils.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
@@ -128,7 +125,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
 
-    async with get_tensorrtllm_engine(engine_args) as engine:
+    async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         if is_first_worker(config):
@@ -165,7 +162,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
-            async with get_tensorrtllm_publisher(
+            async with get_publisher(
                 component,
                 engine,
                 kv_listener,
