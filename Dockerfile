@@ -4,7 +4,11 @@
 ARG BASEIMAGE=ubuntu:24.04
 FROM ${BASEIMAGE} as uv-installer
 RUN apt-get update && apt-get install -y curl
-ADD https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz /tmp/uv.tar.gz
+ARG UV_VERSION=0.8.3
+# Download uv binary and verify against official checksum
+RUN cd /tmp && \
+    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz" -o uv.tar.gz && \
+    echo "$(curl -fsSL https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-x86_64-unknown-linux-gnu.tar.gz.sha256 | cut -d' ' -f1)  uv.tar.gz" | sha256sum -c
 RUN cd /tmp && tar -xzf uv.tar.gz && mv uv-*/uv /usr/local/bin/
 
 # Base image with common dependencies
@@ -89,4 +93,4 @@ RUN uv pip install -r /tmp/requirements.txt
 
 # Install built wheels
 COPY --from=builder /workspace/dist/*.whl /tmp/wheels/
-RUN uv pip install /tmp/wheels/*.whl && rm -rf /tmp/wheels 
+RUN uv pip install /tmp/wheels/*.whl && rm -rf /tmp/wheels
