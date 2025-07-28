@@ -96,6 +96,8 @@ if kubectl get crd gateways.networking.istio.io &>/dev/null; then
     echo -e "${GREEN}Found ${#GATEWAY_LIST[@]} gateway(s)${NC}"
   fi
 
+  VIRTUALSVC_JSON=$(kubectl get virtualservice --all-namespaces -o json 2>/dev/null)
+
   # Get host patterns from virtual services
   HOST_PATTERNS_RAW=$(echo "$VIRTUALSVC_JSON" | jq -r '.items[].spec.hosts[]?' 2>/dev/null | grep -v null | grep -v '\*' || true)
 
