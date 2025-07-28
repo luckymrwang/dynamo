@@ -302,7 +302,7 @@ class HandlerBase:
                 yield {"finish_reason": "error", "token_ids": []}
                 break
 
-            logger.info(f"res.outputs: {res.outputs}")
+            logger.debug(f"res.outputs: {res.outputs}")
             output = res.outputs[0]
             next_total_toks = len(output.token_ids)
             new_tokens = output.token_ids[num_output_tokens_so_far:]

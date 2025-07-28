@@ -15,6 +15,7 @@
 
 from typing import Dict, List
 
+import torch
 from tensorrt_llm.inputs import default_multimodal_input_loader
 
 
@@ -26,10 +27,13 @@ class MultimodalRequestProcessor:
         self.model_dir = model_dir
         self.modality = ""
 
-    def extract_text_and_images(self, messages: List[Dict]) -> tuple[str, List[str]]:
-        """Extract text and image URLs from messages."""
+    def extract_prompt_and_media(
+        self, messages: List[Dict]
+    ) -> tuple[str, List[str], List[str]]:
+        """Extracts text prompt, image URLs, and embedding paths from messages."""
         text_parts = []
         image_urls = []
+        embedding_paths = []
 
         for message in messages:
             for content in message.get("content", []):
@@ -37,20 +41,36 @@ class MultimodalRequestProcessor:
                     text_parts.append(content.get("text", ""))
                 elif content.get("type") == "image_url":
                     url = content.get("image_url", {}).get("url", "")
+                    if not url:
+                        continue
                     self.modality = "image"
-                    if url:
+                    if url.endswith((".pt", ".pth", ".bin")):
+                        embedding_paths.append(url)
+                    else:
                         image_urls.append(url)
 
-        return " ".join(text_parts), image_urls
+        return " ".join(text_parts), image_urls, embedding_paths
 
     async def process_openai_request(self, request: Dict) -> Dict:
         """Process OpenAI request and return with multimodal data."""
         messages = request.get("messages", [])
-        text_prompt, image_urls = self.extract_text_and_images(messages)
+        text_prompt, image_urls, embedding_paths = self.extract_prompt_and_media(
+            messages
+        )
 
-        if not image_urls:
-            # No images, return original request
+        if not image_urls and not embedding_paths:
+            # No multimodal content, return original request
             return request
+
+        mm_embeds = None
+        if embedding_paths:
+            mm_embeds = [torch.load(path) for path in embedding_paths]
+            if not image_urls:
+                image_urls = ["empty_url"]
+
+        kwargs = {}
+        if mm_embeds is not None:
+            kwargs["mm_embeddings"] = mm_embeds
 
         # Process with default_multimodal_input_loader
         processed_inputs = default_multimodal_input_loader(
@@ -62,6 +82,7 @@ class MultimodalRequestProcessor:
             media=[image_urls],
             image_data_format="pt",
             device="cuda",
+            **kwargs,
         )
 
         # Return modified request
