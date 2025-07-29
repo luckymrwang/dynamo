@@ -198,5 +198,5 @@ For instance, to run with N-Grams, launch the worker with the additional argumen
 
 To run with EAGLE (where the target model is meta-llama/Meta-Llama-3-8B-Instruct):
 ```
---speculative-config '{"model":"yuhuili/EAGLE-LLaMA3-Instruct-8B","num_speculative_tokens":5"draft_tensor_parallel_size":1}'
+--speculative-config '{"model":"yuhuili/EAGLE-LLaMA3-Instruct-8B", "num_speculative_tokens":5", draft_tensor_parallel_size":1}'
 ```
