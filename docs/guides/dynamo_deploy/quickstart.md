@@ -142,6 +142,8 @@ if you want guidance during the process, run the deployment script with the `--i
 ***Step 1: Install Custom Resource Definitions (CRDs)**
 
 ```bash
+dynamo/deploy/cloud/helm
+
 helm install dynamo-crds ./crds/ \
   --namespace default \
   --wait \
