@@ -18,8 +18,8 @@
 #
 # This Earthfile is being replaced by the new build system:
 # - Use `make` commands for core builds (see Makefile)
-# - Use `container/build.sh` for framework containers  
 # - See BUILD_SYSTEM_MIGRATION.md for migration guide
+# - Use `container/build.sh` for framework containers
 #
 # This file is kept temporarily for backward compatibility but will
 # be removed in a future release. Please migrate to the new system.

@@ -174,4 +174,4 @@ earthly-test: ## Run tests using current Earthly (for comparison)
 .PHONY: earthly-docker
 earthly-docker: ## Build Docker using current Earthly (for comparison)
 	@echo "WARNING: This is deprecated. Use 'make docker-all' instead."
-	earthly +all-docker $(EARTHLY_ARGS) 
+	earthly +all-docker $(EARTHLY_ARGS)
