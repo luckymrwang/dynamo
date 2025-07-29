@@ -186,3 +186,17 @@ vLLM workers are configured through command-line arguments. Key parameters inclu
 See `args.py` for the full list of configuration options and their defaults.
 
 The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the vLLM CLI args points to running 'vllm serve --help' to see what CLI args can be added. We use the same argument parser as vLLM.
+
+### Speculative Decoding
+
+vLLM workers can also be configured to run with speculative decoding through vLLM's `--speculative-config` command-line argument.
+
+For instance, to run with N-Grams, launch the worker with the additional argument:
+```
+--speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4}'
+```
+
+To run with EAGLE (where the target model is meta-llama/Meta-Llama-3-8B-Instruct):
+```
+--speculative-config '{"model":"yuhuili/EAGLE-LLaMA3-Instruct-8B","num_speculative_tokens":5"draft_tensor_parallel_size":1}'
+```
