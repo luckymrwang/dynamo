@@ -51,7 +51,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:helloworld
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:fresh
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -93,7 +93,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:helloworld
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:fresh
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
