@@ -82,11 +82,11 @@ Sample output:
 ```bash
 # kubectl get inferencepool
 NAME              AGE
-dynamo-deepseek   6s
+dynamo-qwen.      6s
 
 # kubectl get inferencemodel
 NAME              MODEL NAME                                 INFERENCE POOL    CRITICALITY   AGE
-deep-seek-model   deepseek-ai/DeepSeek-R1-Distill-Llama-8B   dynamo-deepseek   Critical      6s
+qwen-model        Qwen/Qwen3-0.6B                            dynamo-qwen   Critical      6s
 
 # kubectl get httproute
 NAME        HOSTNAMES   AGE

@@ -69,5 +69,5 @@ data:
                   - endpoint:
                       address:
                         socket_address:
-                          address: dynamo-deepseek-epp.default.svc.cluster.local
+                          address: dynamo-qwen-epp.default.svc.cluster.local
                           port_value: 9002

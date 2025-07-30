@@ -25,7 +25,7 @@ spec:
   - backendRefs:
     - group: inference.networking.x-k8s.io
       kind: InferencePool
-      name: dynamo-deepseek
+      name: dynamo-qwen
     matches:
     - path:
         type: PathPrefix
