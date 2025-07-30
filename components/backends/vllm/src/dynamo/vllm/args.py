@@ -204,9 +204,6 @@ async def configure_ports_with_etcd(config: Config, etcd_client):
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
     assert (
-        config.kv_port is not None
-    ), "Must set the kv_port, use configure_ports_with_etcd"
-    assert (
         config.side_channel_port is not None
     ), "Must set the kv_port, use configure_ports_with_etcd"
 
