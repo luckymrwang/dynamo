@@ -500,7 +500,7 @@ RUN echo "torch==${TORCH_VER}" > /tmp/constraints.txt && \
     echo "torchvision==${TORCHVISION_VER}" >> /tmp/constraints.txt && \
     uv pip install ai-dynamo nixl --find-links wheelhouse --constraint /tmp/constraints.txt && \
     uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
-    "${TENSORRTLLM_PIP_WHEEL}" --constraint /tmp/constraints.txt
+    "${TENSORRTLLM_PIP_WHEEL}"
 
 # Setup TRTLLM environment variables, same as in dev image
 ENV TRTLLM_USE_UCX_KVCACHE=1
