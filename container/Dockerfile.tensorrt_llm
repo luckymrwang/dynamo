@@ -496,9 +496,10 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 # NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
 # uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match
 # is also specified. So set the configurable index as a --extra-index-url for prioritization.
-RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
-    "${TENSORRTLLM_PIP_WHEEL}" && \
-    uv pip install ai-dynamo nixl --find-links wheelhouse
+RUN uv pip install torch==${TORCH_VER} torchvision==${TORCHVISION_VER} --no-deps && \
+    uv pip install ai-dynamo nixl --find-links wheelhouse && \
+    uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
+    "${TENSORRTLLM_PIP_WHEEL}"
 
 # Setup TRTLLM environment variables, same as in dev image
 ENV TRTLLM_USE_UCX_KVCACHE=1
