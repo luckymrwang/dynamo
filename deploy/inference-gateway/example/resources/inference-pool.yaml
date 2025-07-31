@@ -22,7 +22,8 @@ spec:
   selector:
     nvidia.com/dynamo-component: Frontend
   extensionRef:
-    failureMode: FailOpen
     group: ""
     kind: Service
-    name: dynamo-qwen-epp
+    name: dummy
+    failureMode: FailOpen
+

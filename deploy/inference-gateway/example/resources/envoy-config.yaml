@@ -51,6 +51,28 @@ data:
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            json_format:
+                              start_time: "%START_TIME%"
+                              method: "%REQ(:METHOD)%"
+                              path: "%REQ(:PATH)%"
+                              authority: "%REQ(:AUTHORITY)%"
+                              protocol: "%PROTOCOL%"
+                              response_code: "%RESPONSE_CODE%"
+                              x_gateway_dst_req: "%REQ(X-GATEWAY-DESTINATION-ENDPOINT)%"
+                              x_gateway_dst_resp: "%RESP(X-GATEWAY-DESTINATION-ENDPOINT)%"
+                              x_gateway_worker: "%RESP(X-GATEWAY-WORKER-ID)%"
+                              worker_instance_id: "%RESP(worker_instance_id)%"
+                              gateway_dst_resp_small: "%RESP(x-gateway-destination-endpoint)%"
+                              upstream_host: "%UPSTREAM_HOST%"
+                              upstream_service_time: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+                              duration: "%DURATION%"
+                              response_flags: "%RESPONSE_FLAGS%"
+
 
       clusters:
         - name: dynamo-frontend
