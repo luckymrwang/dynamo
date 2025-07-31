@@ -7,6 +7,7 @@ spec:
   parentRefs:
   - name: inference-gateway
   rules:
+  - priority: 100
   - matches:
     - path:
         type: PathPrefix

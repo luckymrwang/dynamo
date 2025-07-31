@@ -22,6 +22,7 @@ spec:
     kind: Gateway
     name: inference-gateway
   rules:
+  - priority: 10
   - backendRefs:
     - group: inference.networking.x-k8s.io
       kind: InferencePool
