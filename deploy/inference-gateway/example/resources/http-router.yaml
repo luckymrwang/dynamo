@@ -22,7 +22,6 @@ spec:
     kind: Gateway
     name: inference-gateway
   rules:
-  - priority: 10
   - backendRefs:
     - group: inference.networking.x-k8s.io
       kind: InferencePool
@@ -30,6 +29,6 @@ spec:
     matches:
     - path:
         type: PathPrefix
-        value: /
+        value: /v1/completions
     timeouts:
       request: 300s

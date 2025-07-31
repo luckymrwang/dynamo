@@ -7,11 +7,10 @@ spec:
   parentRefs:
   - name: inference-gateway
   rules:
-  - priority: 100
   - matches:
     - path:
         type: PathPrefix
-        value: /
+        value: /v1/chat/completions
     backendRefs:
     - name: envoy-shim
       port: 80
