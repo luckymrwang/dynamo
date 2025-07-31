@@ -4,6 +4,13 @@ metadata:
   name: envoy-shim-config
 data:
   envoy.yaml: |
+    admin:
+      access_log_path: "/tmp/envoy_admin.log"
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+
     static_resources:
       listeners:
         - name: listener_0
@@ -25,7 +32,7 @@ data:
                           domains: ["*"]
                           routes:
                             - match:
-                                prefix: "/preproc"
+                                prefix: "/"
                               route:
                                 cluster: dynamo-frontend
                                 host_rewrite_header: x-gateway-destination-endpoint
@@ -38,6 +45,9 @@ data:
                             envoy_grpc:
                               cluster_name: epp-cluster
                           failure_mode_allow: true
+                          processing_mode:
+                            request_header_mode: SEND
+                            response_header_mode: SEND
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

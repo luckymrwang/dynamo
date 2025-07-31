@@ -10,7 +10,7 @@ spec:
   - matches:
     - path:
         type: PathPrefix
-        value: /preproc
+        value: /
     backendRefs:
     - name: envoy-shim
       port: 80

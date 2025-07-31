@@ -15,7 +15,7 @@ spec:
       containers:
       - name: envoy
         image: envoyproxy/envoy:v1.29-latest
-        args: ["-c", "/etc/envoy/envoy.yaml"]
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "debug"]
         ports:
         - containerPort: 8080
         volumeMounts:
