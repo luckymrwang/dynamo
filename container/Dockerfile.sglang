@@ -444,10 +444,7 @@ RUN apt-get update && \
 COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
-
-# Install flashinfer-python pre-release version separately, then install ai-dynamo with sglang support
-RUN uv pip install "flashinfer-python==0.2.9rc2" --prerelease=allow && \
-    uv pip install "ai-dynamo[sglang]" --find-links wheelhouse
+RUN uv pip install "ai-dynamo[sglang]" --pre --find-links wheelhouse
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
