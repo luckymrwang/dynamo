@@ -66,7 +66,7 @@ data:
                       address:
                         socket_address:
                           address: igw-vllm-agg-frontend.default.svc.cluster.local
-                          port_value: 8080
+                          port_value: 8000
         - name: epp-cluster
           type: STRICT_DNS
           connect_timeout: 0.5s
