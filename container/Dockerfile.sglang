@@ -378,6 +378,8 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
+ENV PYTHONPATH=/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
+
 ########################################
 ########## Development Image ###########
 ########################################
@@ -463,6 +465,8 @@ RUN uv pip install /workspace/benchmarks
 
 # Copy attribution files
 COPY ATTRIBUTION* LICENSE /workspace/
+
+ENV PYTHONPATH=/workspace/examples/sglang/utils:$PYTHONPATH
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
