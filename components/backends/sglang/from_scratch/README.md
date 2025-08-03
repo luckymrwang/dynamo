@@ -1,7 +1,7 @@
 # Building Custom Inference Flows with Dynamo Runtime
 
 ## Introduction
-This guide demonstrates how to build your own pipeline using only the dynamo runtime (NATS for request transport and ETCD for dyanmo worker discovery/registration). We purposefully do not include any helpers from dynamo runtime (rust based openai api server, tokenizer/detokenizer, register_llm hooks, etc). Hopefully this allows you to easily put together your own pipelines!
+This guide demonstrates how to build your own pipeline using only the dynamo runtime (NATS for request transport and ETCD for dyanmo worker discovery/registration). We purposefully do not include any helpers from dynamo llm (rust based openai api server, tokenizer/detokenizer, register_llm hooks, etc). Hopefully this allows you to easily put together your own pipelines!
 
 In this example, we will build a simple pipeline that takes in a chat completion request, tokenizes it, routes to the best available engine based on KV cache metrics, and then sends it to an LLM for inference. At every step, we will also explain how much of this code is handled in our production ready components.
 
