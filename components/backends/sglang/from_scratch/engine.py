@@ -43,29 +43,38 @@ class SGLangEngineHandler:
             
             logging.info(f"Input tokens: {len(token_ids)}, generating up to {sampling_params['max_new_tokens']} tokens")
             
-            # Non-streaming generation
-            logging.info("Calling SGLang async_generate...")
-            result = await self.engine.async_generate(
+            # Use streaming generation like main.py
+            logging.info("Calling SGLang async_generate with stream=True...")
+            stream = await self.engine.async_generate(
                 input_ids=token_ids, 
                 sampling_params=sampling_params, 
-                stream=False
+                stream=True
             )
 
-            logging.info(f"SGLang returned result: {type(result)}")
+            logging.info("Processing SGLang stream...")
+            num_output_tokens_so_far = 0
             
-            # SGLang returns a single result dict when not streaming
-            output_ids = result["output_ids"]
-            finish_reason = result["meta_info"]["finish_reason"]
-            
-            logging.info(f"Generated {len(output_ids)} tokens, finish_reason: {finish_reason}")
-            
-            # Return all generated tokens at once in our expected format
-            response = {
-                "token_ids": output_ids,
-                "finish_reason": finish_reason["type"] if finish_reason else "stop"
-            }
-            logging.info(f"Engine yielding response: {response}")
-            yield response
+            async for res in stream:
+                data = res  # No unpacking needed for direct engine usage
+                finish_reason = data["meta_info"]["finish_reason"]
+                
+                if finish_reason:
+                    # Send completion signal
+                    out = {
+                        "token_ids": [], 
+                        "finish_reason": finish_reason["type"]
+                    }
+                    logging.info(f"Engine yielding finish: {out}")
+                    yield out
+                else:
+                    # Send new tokens only
+                    next_total_toks = len(data["output_ids"])
+                    new_tokens = data["output_ids"][num_output_tokens_so_far:]
+                    if new_tokens:  # Only yield if we have new tokens
+                        out = {"token_ids": new_tokens}
+                        logging.info(f"Engine yielding {len(new_tokens)} new tokens")
+                        yield out
+                    num_output_tokens_so_far = next_total_toks
             
             logging.info("SGLang engine completed generation")
             

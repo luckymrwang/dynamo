@@ -22,7 +22,7 @@ class Message(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    model: Optional[str] = "Qwen/Qwen2.5-0.5B-Instruct"
     messages: List[Message]
     max_tokens: Optional[int] = 25
     temperature: Optional[float] = 0.6
@@ -66,13 +66,16 @@ class FrontendRequestHandler:
                 finished = False
                 async for chunk in processor_response:
                     if chunk:
-                        if chunk.get("content"):
-                            full_content += chunk["content"]
-                        if chunk.get("finish_reason"):
+                        # Extract data from Dynamo transport
+                        data = chunk.data() if hasattr(chunk, 'data') else chunk
+                        
+                        if "content" in data:
+                            full_content += data["content"]
+                        if "finish_reason" in data:
                             finished = True
                             break
-                        if chunk.get("error"):
-                            raise HTTPException(status_code=500, detail=chunk["error"])
+                        if "error" in data:
+                            raise HTTPException(status_code=500, detail=data["error"])
                 
                 if not finished:
                     raise HTTPException(status_code=500, detail="Stream ended before generation completed")
@@ -93,7 +96,7 @@ class FrontendRequestHandler:
         async def health():
             return {"status": "healthy"}
 
-    async def run_server(self, host: str = "0.0.0.0", port: int = 8000):
+    async def run_server(self, host: str = "0.0.0.0", port: int = 8080):
         """Run the FastAPI server"""
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)

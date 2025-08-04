@@ -23,14 +23,14 @@ class Message(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    model: Optional[str] = "Qwen/Qwen2.5-0.5B-Instruct"
     messages: List[Message]
     max_tokens: Optional[int] = 25
     temperature: Optional[float] = 0.6
 
 
 class ProcessorRequestHandler:
-    def __init__(self, runtime: DistributedRuntime, model_name: str = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", enable_router: bool = True):
+    def __init__(self, runtime: DistributedRuntime, model_name: str = "Qwen/Qwen2.5-0.5B-Instruct", enable_router: bool = True):
         self.runtime = runtime
         self.router_client = None
         self.engine_client = None
@@ -118,82 +118,58 @@ class ProcessorRequestHandler:
             # Parse the request
             chat_request = ChatCompletionRequest(**request)
             
-            # Convert messages to text
+            # Convert messages to text and tokenize
             text = self.messages_to_text(chat_request.messages)
-            logging.info(f"Processing text: {text[:200]}...")
-            
-            # Real tokenization
             token_ids = self.tokenize(text)
-            num_tokens = len(token_ids)
             
-            logging.info(f"Tokenized to {num_tokens} tokens: {token_ids[:10]}...")
-
-            # Get worker ID - either from router or default
-            if self.enable_router and self.router_client:
-                # Get best worker from router
-                router_request = {
-                    "local_hashes": token_ids[:10],  # Send first 10 tokens as hashes
-                    "num_tokens": num_tokens
-                }
-                
-                router_response = await self.router_client.find_best_worker(router_request)
-                worker_id = router_response.get("worker_id", 0)
-                logging.info(f"Router selected worker {worker_id}")
-            else:
-                # Simple fallback - use worker 0 or could implement round-robin
-                worker_id = 0
-                logging.info(f"Using default worker {worker_id} (router disabled)")
+            logging.info(f"Tokenized {len(token_ids)} tokens for: {text[:100]}...")
 
             # Prepare engine request
             engine_request = {
                 "token_ids": token_ids,
-                "sampling_options": {
-                    "temperature": chat_request.temperature,
-                },
-                "stop_conditions": {
-                    "max_tokens": chat_request.max_tokens,
-                },
-                "model": chat_request.model,
-                "worker_id": worker_id
+                "sampling_options": {"temperature": chat_request.temperature},
+                "stop_conditions": {"max_tokens": chat_request.max_tokens},
+                "model": chat_request.model
             }
 
-            # Send to engine
+            # Send to engine and collect all tokens
             engine_response = await self.engine_client.generate(engine_request)
-
-            # Process engine response (engine returns token IDs, we need to convert to text)
-            response_received = False
+            all_tokens = []
+            
             async for chunk in engine_response:
                 if chunk:
-                    response_received = True
-                    logging.info(f"Processor received chunk: {chunk}")
+                    logging.info(f"Raw chunk: {chunk}, type: {type(chunk)}")
                     
-                    if chunk.get("error"):
-                        yield {"error": chunk["error"]}
+                    # Extract data from Dynamo transport
+                    if hasattr(chunk, 'data'):
+                        data = chunk.data()  # Call the method, not access as attribute
+                        logging.info(f"Extracted data: {data}, type: {type(data)}")
+                    else:
+                        data = chunk
+                        logging.info(f"Using chunk directly: {data}, type: {type(data)}")
+                    
+                    # Ensure data is a dict before using 'in' operator
+                    if not isinstance(data, dict):
+                        logging.error(f"Expected dict, got {type(data)}: {data}")
+                        yield {"error": f"Invalid data type: {type(data)}"}
                         return
                     
-                    # Convert token IDs back to text
-                    if chunk.get("token_ids"):
-                        output_token_ids = chunk["token_ids"]
-                        if output_token_ids:  # Only detokenize if we have tokens
-                            content = self.detokenize(output_token_ids)
-                            logging.info(f"Generated content: {content[:100]}...")
-                            yield {"content": content}
+                    if "error" in data:
+                        yield {"error": data["error"]}
+                        return
                     
-                    if chunk.get("finish_reason"):
-                        logging.info(f"Received finish_reason: {chunk['finish_reason']}")
-                        yield {"finish_reason": chunk["finish_reason"]}
-                        return  # Explicitly end after finish signal
-            
-            # If we got here without a finish signal, something went wrong
-            if response_received:
-                logging.warning("Engine response ended without finish_reason")
-                yield {"finish_reason": "stop"}  # Ensure we always send finish signal
-            else:
-                logging.error("No response received from engine")
-                yield {"error": "No response from engine"}
+                    if "token_ids" in data and data["token_ids"]:
+                        all_tokens.extend(data["token_ids"])
+                    
+                    if "finish_reason" in data:
+                        # Detokenize and return complete response
+                        content = self.detokenize(all_tokens) if all_tokens else ""
+                        yield {"content": content}
+                        yield {"finish_reason": data["finish_reason"]}
+                        return
 
         except Exception as e:
-            logging.error(f"Error in processor generate: {e}")
+            logging.error(f"Error in processor: {e}")
             yield {"error": str(e)}
 
 
@@ -203,8 +179,8 @@ def parse_args():
     parser.add_argument(
         "--model", 
         type=str, 
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Model name/path for tokenizer (default: deepseek-ai/DeepSeek-R1-Distill-Llama-8B)"
+        default="Qwen/Qwen2.5-0.5B-Instruct",
+        help="Model name/path for tokenizer (default: Qwen/Qwen2.5-0.5B-Instruct)"
     )
     parser.add_argument(
         "--enable-router",
