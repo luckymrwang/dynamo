@@ -35,7 +35,7 @@ data:
                                 prefix: "/"
                               route:
                                 cluster: dynamo-frontend
-                                host_rewrite_header: x-gateway-destination-endpoint
+                                host_rewrite_header: x-gateway-worker-id
                                 timeout: "300s"
                     http_filters:
                       - name: envoy.filters.http.ext_proc
