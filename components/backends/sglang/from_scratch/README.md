@@ -1,143 +1,112 @@
 # Building Custom Inference Flows with Dynamo Runtime
 
 ## Introduction
-This guide demonstrates how to build your own pipeline using only the dynamo runtime (NATS for request transport and ETCD for dyanmo worker discovery/registration). We purposefully do not include any helpers from dynamo llm (rust based openai api server, tokenizer/detokenizer, register_llm hooks, etc). Hopefully this allows you to easily put together your own pipelines!
 
-In this example, we will build a simple pipeline that takes in a chat completion request, tokenizes it, routes to the best available engine based on KV cache metrics, and then sends it to an LLM for inference. At every step, we will also explain how much of this code is handled in our production ready components.
+This tutorial series shows you how to build production-ready inference pipelines from scratch using Dynamo's runtime infrastructure. You'll learn to create distributed, scalable systems by connecting components through NATS and service discovery via etcd.
 
-## Components
+**What makes this different:** No helpers from Dynamo LLM - just pure runtime patterns you can apply to any pipeline architecture.
 
-All components communicate via NATS and register themselves in etcd using the `DistributedRuntime`.
+## Chapter Progression
 
-### 1. Frontend (FastAPI + NATS Client)
-- Accepts OpenAI-compatible chat completion requests
-- Sends requests to Processor via NATS
-- Returns streaming responses to client
+### [Chapter 1: Simple Chat Pipeline](chapter1/)
+**Goal:** Learn the fundamentals of Dynamo components and communication
 
-### 2. Processor (Tokenizer Service)
-- Receives chat requests from Frontend
-- Tokenizes input using model tokenizer
-- Sends tokenized request to Router
-- Handles response detokenization
-
-### 3. Router (Load Balancer)
-- Similar to `examples/deployments/router_standalone/router.py`
-- Receives tokenized requests from Processor
-- Uses metrics/KV cache data to select best Engine
-- Returns Engine worker ID to Processor
-
-### 4. Engine (LLM Inference)
-- Similar to `lib/bindings/python/examples/hello_world/server_sglang_tok.py`
-- Performs actual LLM inference
-- Publishes metrics and KV events for Router
-- Returns token streams
-
-## Key Patterns
-
-### Using DistributedRuntime
-
-All components use the `@dynamo_worker` decorator and `DistributedRuntime`:
-
-```python
-from dynamo.runtime import DistributedRuntime, dynamo_worker
-
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
-    component = runtime.namespace("your_namespace").component("your_component")
-    await component.create_service()
-
-    endpoint = component.endpoint("your_endpoint")
-    # Set up your service logic
-    await endpoint.serve_endpoint(your_handler)
+Build a basic 3-component pipeline:
+```
+Client → Frontend → Processor → Engine
+         (HTTP)     (Tokenizer) (SGLang)
 ```
 
-### NATS Communication
+**Key Concepts:**
+- `@dynamo_worker` decorator and service registration
+- Service vs Client patterns  
+- Data transport with `chunk.data()`
+- Async generator streaming
 
-Components communicate by calling endpoints on other components:
+### Chapter 2: Adding a Router
+**Goal:** Load balancing and intelligent request routing
 
-```python
-# Get client for another component
-client = await runtime.namespace("namespace").component("component").endpoint("endpoint").client()
-
-# Send request
-response = await client.your_method(request_data)
+Add a router component for multi-engine deployments:
+```
+Client → Frontend → Processor → Router → Engine (multiple)
 ```
 
-### Service Registration
+**New Concepts:**
+- KV cache metrics and engine selection
+- ZMQ event publishing/subscribing
+- RadixTree for cache-aware routing
 
-The runtime handles etcd registration automatically when you call `create_service()`. Services are discoverable by namespace/component/endpoint.
+### Chapter 3: Custom Router Logic
+**Goal:** Implement sophisticated routing strategies
 
-## Component Details
+Build custom routing algorithms:
+- Prefix caching optimization
+- Engine health monitoring
+- Request queuing and prioritization
 
-### Frontend
-- **Namespace**: `inference`
-- **Component**: `frontend`
-- **Endpoints**: `chat_completions`
-- **Input**: OpenAI chat completion request
-- **Output**: Streaming chat completion response
-- **Calls**: Processor's `process` endpoint
+### Chapter 4: Agentic Loops
+**Goal:** Multi-step reasoning and tool usage
 
-### Processor
-- **Namespace**: `inference`
-- **Component**: `processor`
-- **Endpoints**: `process`
-- **Input**: Chat completion request
-- **Output**: Chat completion response
-- **Calls**: Router's `find_worker` and Engine's `generate`
+Transform the pipeline for agent workflows:
+- Multi-turn conversations with memory
+- Tool calling and execution
+- Dynamic request routing based on agent state
 
-### Router
-- **Namespace**: `inference`
-- **Component**: `router`
-- **Endpoints**: `find_worker`
-- **Input**: Tokenized request + metadata
-- **Output**: Selected worker ID
-- **Dependencies**: Subscribes to Engine metrics via ZMQ
+### Chapter 5: Kubernetes Deployment
+**Goal:** Production deployment and scaling
 
-### Engine
-- **Namespace**: `inference`
-- **Component**: `engine`
-- **Endpoints**: `generate`
-- **Input**: Tokenized request
-- **Output**: Token stream
-- **Dependencies**: Publishes metrics and KV events
+Deploy the complete system:
+- Kubernetes manifests and operators
+- Auto-scaling based on load
+- Monitoring and observability
 
-## Metrics & Load Balancing
+## Core Architecture
 
-For Router/Engine coordination, see `components/backends/sglang/src/dynamo/sglang/worker/main.py`:
+### Runtime Infrastructure
+- **NATS**: Message transport between components
+- **etcd**: Service registration and discovery
+- **DistributedRuntime**: Unified interface for both
 
-- Engines publish metrics via `WorkerMetricsPublisher`
-- Router subscribes to metrics via ZMQ sockets
-- KV cache events published via `ZmqKvEventPublisher`
-- Router uses `RadixTree` for cache-aware routing
+### Communication Patterns
+- **Service Registration**: `component.create_service()` → etcd
+- **Client Discovery**: `.client()` → etcd lookup → NATS connection  
+- **Request Flow**: `client.method(data)` → NATS → service handler
+
+### Key Design Principles
+1. **Separation of Concerns**: Each component has one responsibility
+2. **Transport Agnostic**: Business logic separate from communication
+3. **Discoverable**: Components find each other automatically
+4. **Streaming First**: Internal streaming with external aggregation
+5. **Fault Tolerant**: Components can restart independently
 
 ## Getting Started
 
-1. **Setup**: Install dynamo runtime and dependencies
-2. **Start Infrastructure**:
-   ```bash
-   nats-server -js
-   etcd
-   ```
-3. **Run Components** in order:
-   ```bash
-   python engine.py --worker-id 0
-   python engine.py --worker-id 1
-   python router.py
-   python processor.py
-   python frontend.py
-   ```
+### Prerequisites
+```bash
+# Install Dynamo runtime
+pip install ai-dynamo[sglang]
+```
 
-## Example File References
+### Infrastructure Setup
+```bash
+# Terminal 1: Start NATS with JetStream
+nats-server -js
 
-- **Router Logic**: `examples/deployments/router_standalone/router.py`
-- **Engine Pattern**: `lib/bindings/python/examples/hello_world/server_sglang_tok.py`
-- **Metrics Setup**: `components/backends/sglang/src/dynamo/sglang/worker/main.py`
+# Terminal 2: Start etcd
+etcd
+```
 
-## Key Differences from Standard Dynamo
+## What You'll Learn
 
-- No `register_llm()` calls - you handle model loading directly
-- No automatic request routing - you implement custom routing logic
-- Manual metrics publishing - you control what metrics to expose
-- Custom request/response formats - not bound to standard LLM protocols
+By the end of this series, you'll understand:
 
-This approach gives you full control over the inference pipeline while leveraging Dynamo's robust transport and discovery infrastructure.
+- **Distributed System Design**: How to architect scalable inference pipelines
+- **Service Communication**: NATS-based messaging and etcd service discovery
+- **Load Balancing**: Intelligent routing based on system metrics
+- **Production Deployment**: Kubernetes orchestration and monitoring
+
+## Next Steps
+
+Start with [Chapter 1](chapter1/) to build your first pipeline, then progress through the chapters to build increasingly sophisticated systems.
+
+Each chapter builds on the previous ones, so follow them in order for the best learning experience.
