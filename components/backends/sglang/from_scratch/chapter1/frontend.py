@@ -61,32 +61,26 @@ class FrontendRequestHandler:
                 # generate under the hood is using round robin
                 processor_response = await self.processor_client.generate(request.model_dump())
                 
-                # Collect all content
+                # Collect response - expecting single response with content
                 full_content = ""
-                finished = False
                 async for chunk in processor_response:
-                    if chunk:
-                        # Extract data from Dynamo transport
-                        data = chunk.data() if hasattr(chunk, 'data') else chunk
-                        
-                        if "content" in data:
-                            full_content += data["content"]
-                        if "finish_reason" in data:
-                            finished = True
-                            break
-                        if "error" in data:
-                            raise HTTPException(status_code=500, detail=data["error"])
-                
-                if not finished:
-                    raise HTTPException(status_code=500, detail="Stream ended before generation completed")
+                    data = chunk.data()
+                    
+                    if "error" in data:
+                        raise HTTPException(status_code=500, detail=data["error"])
+                    
+                    if "content" in data:
+                        full_content = data["content"]
+                        return {
+                            "id": "chatcmpl-123",
+                            "object": "chat.completion",
+                            "created": int(time.time()),
+                            "model": request.model,
+                            "choices": [{"message": Message(role="assistant", content=full_content)}],
+                        }
 
-                return {
-                    "id": "chatcmpl-123",
-                    "object": "chat.completion",
-                    "created": int(time.time()),
-                    "model": request.model,
-                    "choices": [{"message": Message(role="assistant", content=full_content)}],
-                }
+                # If no content received, return empty response
+                raise HTTPException(status_code=500, detail="No content received from processor")
 
             except Exception as e:
                 logging.error(f"Error in chat completions: {e}")

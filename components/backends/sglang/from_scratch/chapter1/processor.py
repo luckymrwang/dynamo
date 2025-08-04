@@ -107,9 +107,7 @@ class ProcessorRequestHandler:
                 logging.warning(f"Chat template failed: {e}, falling back to simple format")
         
         # Fallback to simple format
-        text_parts = []
-        for msg in messages:
-            text_parts.append(f"{msg.role}: {msg.content}")
+        text_parts = [f"{msg.role}: {msg.content}" for msg in messages]
         return "\n".join(text_parts) + "\nassistant:"
 
     async def generate(self, request: Dict[str, Any]):
@@ -122,7 +120,7 @@ class ProcessorRequestHandler:
             text = self.messages_to_text(chat_request.messages)
             token_ids = self.tokenize(text)
             
-            logging.info(f"Tokenized {len(token_ids)} tokens for: {text[:100]}...")
+            logging.debug(f"Tokenized {len(token_ids)} tokens for: {text[:100]}...")
 
             # Prepare engine request
             engine_request = {
@@ -133,26 +131,14 @@ class ProcessorRequestHandler:
             }
 
             # Send to engine and collect all tokens
+            # generate uses round robin under the hood
             engine_response = await self.engine_client.generate(engine_request)
             all_tokens = []
             
             async for chunk in engine_response:
                 if chunk:
-                    logging.info(f"Raw chunk: {chunk}, type: {type(chunk)}")
-                    
                     # Extract data from Dynamo transport
-                    if hasattr(chunk, 'data'):
-                        data = chunk.data()  # Call the method, not access as attribute
-                        logging.info(f"Extracted data: {data}, type: {type(data)}")
-                    else:
-                        data = chunk
-                        logging.info(f"Using chunk directly: {data}, type: {type(data)}")
-                    
-                    # Ensure data is a dict before using 'in' operator
-                    if not isinstance(data, dict):
-                        logging.error(f"Expected dict, got {type(data)}: {data}")
-                        yield {"error": f"Invalid data type: {type(data)}"}
-                        return
+                    data = chunk.data()
                     
                     if "error" in data:
                         yield {"error": data["error"]}
@@ -164,8 +150,7 @@ class ProcessorRequestHandler:
                     if "finish_reason" in data:
                         # Detokenize and return complete response
                         content = self.detokenize(all_tokens) if all_tokens else ""
-                        yield {"content": content}
-                        yield {"finish_reason": data["finish_reason"]}
+                        yield {"content": content, "finish_reason": data["finish_reason"]}
                         return
 
         except Exception as e:

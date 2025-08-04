@@ -16,10 +16,6 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
 
-DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
-DEFAULT_TEMPERATURE = 0.7
-
-
 class SGLangEngineHandler:
     def __init__(self, server_args: ServerArgs):
         self.server_args = server_args
@@ -27,7 +23,7 @@ class SGLangEngineHandler:
         logging.info(f"SGLang engine worker initialized successfully")
 
     async def generate(self, request: Dict[str, Any]):
-        """Generate response using SGLang - non-streaming"""
+        """Generate response using SGLang"""
         try:
             logging.info("SGLang engine received request")
             
@@ -37,14 +33,11 @@ class SGLangEngineHandler:
             
             # Build sampling params in SGLang format
             sampling_params = {
-                "temperature": sampling_options.get("temperature", DEFAULT_TEMPERATURE),
+                "temperature": sampling_options.get("temperature", 0.7),
                 "max_new_tokens": stop_conditions.get("max_tokens", 25),
             }
             
-            logging.info(f"Input tokens: {len(token_ids)}, generating up to {sampling_params['max_new_tokens']} tokens")
-            
-            # Use streaming generation like main.py
-            logging.info("Calling SGLang async_generate with stream=True...")
+            # We want to stream but accumulate at the processor
             stream = await self.engine.async_generate(
                 input_ids=token_ids, 
                 sampling_params=sampling_params, 
@@ -55,8 +48,7 @@ class SGLangEngineHandler:
             num_output_tokens_so_far = 0
             
             async for res in stream:
-                data = res  # No unpacking needed for direct engine usage
-                finish_reason = data["meta_info"]["finish_reason"]
+                finish_reason = res["meta_info"]["finish_reason"]
                 
                 if finish_reason:
                     # Send completion signal
@@ -68,15 +60,14 @@ class SGLangEngineHandler:
                     yield out
                 else:
                     # Send new tokens only
-                    next_total_toks = len(data["output_ids"])
-                    new_tokens = data["output_ids"][num_output_tokens_so_far:]
+                    next_total_toks = len(res["output_ids"])
+                    new_tokens = res["output_ids"][num_output_tokens_so_far:]
                     if new_tokens:  # Only yield if we have new tokens
                         out = {"token_ids": new_tokens}
                         logging.info(f"Engine yielding {len(new_tokens)} new tokens")
                         yield out
                     num_output_tokens_so_far = next_total_toks
             
-            logging.info("SGLang engine completed generation")
             
         except Exception as e:
             logging.error(f"Error in SGLang engine generate: {e}")
