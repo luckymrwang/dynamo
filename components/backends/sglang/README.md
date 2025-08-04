@@ -34,20 +34,20 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../docs/architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../docs/architecture/sla_planner.md) | ❌ | Planned |
-| [**Load Based Planner**](../../docs/architecture/load_planner.md) | ❌ | Planned |
-| [**KVBM**](../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
+| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ❌ | Planned |
+| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
+| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
 ### Large Scale P/D and WideEP Features
 
-| Feature            | SGLang | Notes                                                                 |
-|--------------------|--------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅/🚧 | Full support on H100s/GB200 WIP [PR](https://github.com/sgl-project/sglang/pull/7556)                                     |
-| **DP Rank Routing**| 🚧    | Direct routing supported. Process per DP rank is not supported        |
-| **GB200 Support**  | 🚧    | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
+| Feature             | SGLang | Notes                                                        |
+|---------------------|--------|--------------------------------------------------------------|
+| **WideEP**          | ✅     | Full support on H100s/GB200                                  |
+| **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
+| **GB200 Support**   | ✅     |                                                              |
 
 
 ## Quick Start
@@ -94,12 +94,6 @@ cd $DYNAMO_ROOT/components/backends/sglang
 
 ### Aggregated Serving with KV Routing
 
-> [!NOTE]
-> The current implementation of `components/backends/sglang/src/dynamo/sglang/worker/main.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
-> • Dynamo: [ai-dynamo/dynamo #1465](https://github.com/ai-dynamo/dynamo/pull/1465) – _feat: receive kvmetrics from sglang scheduler_.
->
-> After these are in, the TODOs in `main.py` will be resolved and the placeholder logic removed.
-
 ```bash
 cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/agg_router.sh
@@ -139,32 +133,38 @@ cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
 
+When using MoE models, you can also use the our implementation of the native SGLang endpoints to record expert distribution data. The `disagg_dp_attn.sh` script automatically sets up the SGLang HTTP server, the environment variable that controls the expert distribution recording directory, and sets up the expert distribution recording mode to `stat`. You can learn more about expert parallelism load balancing [here](docs/expert-distribution-eplb.md).
+
+## Request Migration
+
+You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+
+```bash
+python3 -m dynamo.sglang ... --migration-limit=3
+```
+
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
+
 ## Advanced Examples
 
 Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
 
-### Run on multi-node
+### Run a multi-node sized model
 - **[Run a multi-node model](docs/multinode-examples.md)**
 
 ### Large scale P/D disaggregation with WideEP
 - **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
 - **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
 
-### Speculative Decoding
-- **[Deploying DeepSeek-R1 with MTP - coming soon!](.)**
-
-### Structured Output and Tool Calling
-- **[Tool calling with Dynamo - coming soon!](.)**
-
 ### Supporting SGLang's native endpoints via Dynamo
 - **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
 
 ## Deployment
 
-We currently provide deployment examples for Kubernetes (coming soon!) and SLURM
+We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
+- **[Deploying Dynamo with SGLang on Kubernetes](deploy/README.md)**
 
 ## SLURM
 - **[Deploying Dynamo with SGLang on SLURM](slurm_jobs/README.md)**
