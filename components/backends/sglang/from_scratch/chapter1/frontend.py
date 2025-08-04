@@ -4,10 +4,10 @@
 import asyncio
 import logging
 import time
-from typing import Optional, List
+from typing import List, Optional
 
-import uvloop
 import uvicorn
+import uvloop
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
@@ -15,6 +15,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
+
 
 class Message(BaseModel):
     role: str
@@ -54,21 +55,24 @@ class FrontendRequestHandler:
 
     def setup_routes(self):
         """Setup FastAPI routes"""
+
         @self.app.post("/v1/chat/completions")
         async def chat_completions(request: ChatCompletionRequest):
             try:
                 # Send request to processor
                 # generate under the hood is using round robin
-                processor_response = await self.processor_client.generate(request.model_dump())
-                
+                processor_response = await self.processor_client.generate(
+                    request.model_dump()
+                )
+
                 # Collect response - expecting single response with content
                 full_content = ""
                 async for chunk in processor_response:
                     data = chunk.data()
-                    
+
                     if "error" in data:
                         raise HTTPException(status_code=500, detail=data["error"])
-                    
+
                     if "content" in data:
                         full_content = data["content"]
                         return {
@@ -76,11 +80,19 @@ class FrontendRequestHandler:
                             "object": "chat.completion",
                             "created": int(time.time()),
                             "model": request.model,
-                            "choices": [{"message": Message(role="assistant", content=full_content)}],
+                            "choices": [
+                                {
+                                    "message": Message(
+                                        role="assistant", content=full_content
+                                    )
+                                }
+                            ],
                         }
 
                 # If no content received, return empty response
-                raise HTTPException(status_code=500, detail="No content received from processor")
+                raise HTTPException(
+                    status_code=500, detail="No content received from processor"
+                )
 
             except Exception as e:
                 logging.error(f"Error in chat completions: {e}")
@@ -94,7 +106,7 @@ class FrontendRequestHandler:
         """Run the FastAPI server"""
         config = uvicorn.Config(self.app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
-        
+
         logging.info(f"Starting FastAPI server on {host}:{port}")
         await server.serve()
 
@@ -108,6 +120,7 @@ async def worker(runtime: DistributedRuntime):
 
     # Start FastAPI server
     await frontend.run_server()
+
 
 if __name__ == "__main__":
     uvloop.install()

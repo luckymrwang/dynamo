@@ -4,8 +4,7 @@
 import argparse
 import asyncio
 import logging
-import sys
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
 
 import uvloop
 from pydantic import BaseModel
@@ -30,7 +29,12 @@ class ChatCompletionRequest(BaseModel):
 
 
 class ProcessorRequestHandler:
-    def __init__(self, runtime: DistributedRuntime, model_name: str = "Qwen/Qwen2.5-0.5B-Instruct", enable_router: bool = True):
+    def __init__(
+        self,
+        runtime: DistributedRuntime,
+        model_name: str = "Qwen/Qwen2.5-0.5B-Instruct",
+        enable_router: bool = True,
+    ):
         self.runtime = runtime
         self.router_client = None
         self.engine_client = None
@@ -59,7 +63,7 @@ class ProcessorRequestHandler:
         else:
             logging.info("Router disabled - will use round-robin worker selection")
 
-        # Get engine client  
+        # Get engine client
         self.engine_client = (
             await self.runtime.namespace("inference")
             .component("engine")
@@ -73,7 +77,7 @@ class ProcessorRequestHandler:
         """Tokenize text using the loaded tokenizer"""
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer not initialized")
-        
+
         # Tokenize the text
         tokens = self.tokenizer.encode(text, add_special_tokens=True)
         return tokens
@@ -82,7 +86,7 @@ class ProcessorRequestHandler:
         """Convert token IDs back to text"""
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer not initialized")
-        
+
         text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
         return text
 
@@ -90,22 +94,25 @@ class ProcessorRequestHandler:
         """Convert chat messages to a single text string using chat template if available"""
         if self.tokenizer is None:
             raise RuntimeError("Tokenizer not initialized")
-        
+
         # Convert to dict format for chat template
         message_dicts = [{"role": msg.role, "content": msg.content} for msg in messages]
-        
+
         # Try to use chat template if available
-        if hasattr(self.tokenizer, 'apply_chat_template') and self.tokenizer.chat_template:
+        if (
+            hasattr(self.tokenizer, "apply_chat_template")
+            and self.tokenizer.chat_template
+        ):
             try:
                 text = self.tokenizer.apply_chat_template(
-                    message_dicts, 
-                    tokenize=False, 
-                    add_generation_prompt=True
+                    message_dicts, tokenize=False, add_generation_prompt=True
                 )
                 return text
             except Exception as e:
-                logging.warning(f"Chat template failed: {e}, falling back to simple format")
-        
+                logging.warning(
+                    f"Chat template failed: {e}, falling back to simple format"
+                )
+
         # Fallback to simple format
         text_parts = [f"{msg.role}: {msg.content}" for msg in messages]
         return "\n".join(text_parts) + "\nassistant:"
@@ -115,11 +122,11 @@ class ProcessorRequestHandler:
         try:
             # Parse the request
             chat_request = ChatCompletionRequest(**request)
-            
+
             # Convert messages to text and tokenize
             text = self.messages_to_text(chat_request.messages)
             token_ids = self.tokenize(text)
-            
+
             logging.debug(f"Tokenized {len(token_ids)} tokens for: {text[:100]}...")
 
             # Prepare engine request
@@ -127,30 +134,33 @@ class ProcessorRequestHandler:
                 "token_ids": token_ids,
                 "sampling_options": {"temperature": chat_request.temperature},
                 "stop_conditions": {"max_tokens": chat_request.max_tokens},
-                "model": chat_request.model
+                "model": chat_request.model,
             }
 
             # Send to engine and collect all tokens
             # generate uses round robin under the hood
             engine_response = await self.engine_client.generate(engine_request)
             all_tokens = []
-            
+
             async for chunk in engine_response:
                 if chunk:
                     # Extract data from Dynamo transport
                     data = chunk.data()
-                    
+
                     if "error" in data:
                         yield {"error": data["error"]}
                         return
-                    
+
                     if "token_ids" in data and data["token_ids"]:
                         all_tokens.extend(data["token_ids"])
-                    
+
                     if "finish_reason" in data:
                         # Detokenize and return complete response
                         content = self.detokenize(all_tokens) if all_tokens else ""
-                        yield {"content": content, "finish_reason": data["finish_reason"]}
+                        yield {
+                            "content": content,
+                            "finish_reason": data["finish_reason"],
+                        }
                         return
 
         except Exception as e:
@@ -160,24 +170,26 @@ class ProcessorRequestHandler:
 
 def parse_args():
     """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description="Processor component for inference pipeline")
+    parser = argparse.ArgumentParser(
+        description="Processor component for inference pipeline"
+    )
     parser.add_argument(
-        "--model", 
-        type=str, 
+        "--model",
+        type=str,
         default="Qwen/Qwen2.5-0.5B-Instruct",
-        help="Model name/path for tokenizer (default: Qwen/Qwen2.5-0.5B-Instruct)"
+        help="Model name/path for tokenizer (default: Qwen/Qwen2.5-0.5B-Instruct)",
     )
     parser.add_argument(
         "--enable-router",
         action="store_true",
         default=False,
-        help="Enable router for worker selection (default: False)"
+        help="Enable router for worker selection (default: False)",
     )
     parser.add_argument(
         "--tokenize-in-processor",
         action="store_true",
         default=False,
-        help="Tokenize in processor (default: False)"
+        help="Tokenize in processor (default: False)",
     )
     return parser.parse_args()
 
@@ -187,18 +199,18 @@ async def worker(runtime: DistributedRuntime):
     """Main worker function"""
     # Parse command line arguments
     args = parse_args()
-    
-    logging.info(f"Starting processor with model: {args.model}, router enabled: {args.enable_router}")
-    
+
+    logging.info(
+        f"Starting processor with model: {args.model}, router enabled: {args.enable_router}"
+    )
+
     # Create processor component
     component = runtime.namespace("inference").component("processor")
     await component.create_service()
 
     # Initialize processor with args
     processor = ProcessorRequestHandler(
-        runtime, 
-        model_name=args.model,
-        enable_router=args.enable_router
+        runtime, model_name=args.model, enable_router=args.enable_router
     )
     await processor.initialize()
 

@@ -14,7 +14,7 @@ All components communicate via NATS and register themselves in etcd using the `D
 - Sends requests to Processor via NATS
 - Returns streaming responses to client
 
-### 2. Processor (Tokenizer Service)  
+### 2. Processor (Tokenizer Service)
 - Receives chat requests from Frontend
 - Tokenizes input using model tokenizer
 - Sends tokenized request to Router
@@ -45,7 +45,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 async def worker(runtime: DistributedRuntime):
     component = runtime.namespace("your_namespace").component("your_component")
     await component.create_service()
-    
+
     endpoint = component.endpoint("your_endpoint")
     # Set up your service logic
     await endpoint.serve_endpoint(your_handler)
@@ -71,13 +71,13 @@ The runtime handles etcd registration automatically when you call `create_servic
 
 ### Frontend
 - **Namespace**: `inference`
-- **Component**: `frontend` 
+- **Component**: `frontend`
 - **Endpoints**: `chat_completions`
 - **Input**: OpenAI chat completion request
 - **Output**: Streaming chat completion response
 - **Calls**: Processor's `process` endpoint
 
-### Processor  
+### Processor
 - **Namespace**: `inference`
 - **Component**: `processor`
 - **Endpoints**: `process`
@@ -86,7 +86,7 @@ The runtime handles etcd registration automatically when you call `create_servic
 - **Calls**: Router's `find_worker` and Engine's `generate`
 
 ### Router
-- **Namespace**: `inference` 
+- **Namespace**: `inference`
 - **Component**: `router`
 - **Endpoints**: `find_worker`
 - **Input**: Tokenized request + metadata
@@ -95,7 +95,7 @@ The runtime handles etcd registration automatically when you call `create_servic
 
 ### Engine
 - **Namespace**: `inference`
-- **Component**: `engine` 
+- **Component**: `engine`
 - **Endpoints**: `generate`
 - **Input**: Tokenized request
 - **Output**: Token stream
@@ -113,7 +113,7 @@ For Router/Engine coordination, see `components/backends/sglang/src/dynamo/sglan
 ## Getting Started
 
 1. **Setup**: Install dynamo runtime and dependencies
-2. **Start Infrastructure**: 
+2. **Start Infrastructure**:
    ```bash
    nats-server -js
    etcd
@@ -121,7 +121,7 @@ For Router/Engine coordination, see `components/backends/sglang/src/dynamo/sglan
 3. **Run Components** in order:
    ```bash
    python engine.py --worker-id 0
-   python engine.py --worker-id 1  
+   python engine.py --worker-id 1
    python router.py
    python processor.py
    python frontend.py
@@ -130,7 +130,7 @@ For Router/Engine coordination, see `components/backends/sglang/src/dynamo/sglan
 ## Example File References
 
 - **Router Logic**: `examples/deployments/router_standalone/router.py`
-- **Engine Pattern**: `lib/bindings/python/examples/hello_world/server_sglang_tok.py`  
+- **Engine Pattern**: `lib/bindings/python/examples/hello_world/server_sglang_tok.py`
 - **Metrics Setup**: `components/backends/sglang/src/dynamo/sglang/worker/main.py`
 
 ## Key Differences from Standard Dynamo

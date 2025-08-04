@@ -13,7 +13,7 @@ Client → Frontend → Processor → Engine
 
 **Flow:**
 1. **Frontend** (`frontend.py`) - HTTP API that accepts chat requests
-2. **Processor** (`processor.py`) - Tokenizes text and orchestrates the pipeline  
+2. **Processor** (`processor.py`) - Tokenizes text and orchestrates the pipeline
 3. **Engine** (`engine.py`) - Runs SGLang for LLM inference
 
 ## Key Dynamo Concepts
@@ -60,7 +60,7 @@ When components communicate via NATS, your data gets wrapped in an `Annotated` o
 ```python
 async for chunk in response_stream:
     data = chunk.data()  # Extract the actual dict
-    
+
     if "content" in data:
         print(data["content"])
 ```
@@ -124,7 +124,7 @@ Because discovery is handled by Dynamo, once you start these 3 components up, yo
 # Terminal 1: Start the engine
 python engine.py --model-path Qwen/Qwen2.5-0.5B-Instruct
 
-# Terminal 2: Start the processor  
+# Terminal 2: Start the processor
 python processor.py --model Qwen/Qwen2.5-0.5B-Instruct
 
 # Terminal 3: Start the frontend
@@ -140,7 +140,7 @@ curl -X POST http://localhost:8080/v1/chat/completions \
   }'
 ```
 
-## Understanding how Dynamo's discovery mechanism. 
+## Understanding how Dynamo's discovery mechanism.
 
 Under the hood, Dynamo uses NATS for communication between components and ETCD for component registration and discovery. In a terminal, run the following command after you've started the components:
 
