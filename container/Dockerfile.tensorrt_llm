@@ -17,7 +17,7 @@ ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.05-py3"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -500,7 +500,7 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
     "${TENSORRTLLM_PIP_WHEEL}" && \
     uv pip install ai-dynamo nixl --find-links wheelhouse && \
-    uv pip install --reinstall torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu129
+    uv pip install --reinstall torch==2.7.1 torchvision --index-url https://download.pytorch.org/whl/cu128
 
 # Setup TRTLLM environment variables, same as in dev image
 ENV TRTLLM_USE_UCX_KVCACHE=1
