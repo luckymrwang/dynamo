@@ -118,7 +118,7 @@ The engine handles pure inference:
 
 ## Running the Pipeline
 
-Because discovery is handled by Dynamo, once you start these 3 components up, you can easily kill one of the components, make a change, and restart it without it affeecting any other components.
+Because discovery is handled by Dynamo, once you start these 3 components up, you can easily kill one of the components, make a change, and restart it without it affeecting any other components. Note the use of `configure_dynamo_logging` to set the logging level for Dynamo. This allows python and rust logging to look the same. To enable debug logging, simply set the environment variable `DYN_LOG_LEVEL=debug` and then run any of the components. 
 
 ```bash
 # Terminal 1: Start the engine
