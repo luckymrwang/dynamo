@@ -185,6 +185,65 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 ### Speculative Decoding
 - **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4_plus_eagle.md)**
 
+### Kubernetes Deployment
+
+For Kubernetes deployment, YAML manifests are provided in the `deploy/` directory. These define DynamoGraphDeployment resources for various configurations:
+
+- `agg.yaml` - Aggregated serving
+- `agg_router.yaml` - Aggregated serving with KV routing
+- `disagg.yaml` - Disaggregated serving
+- `disagg_router.yaml` - Disaggregated serving with KV routing
+
+#### Prerequisites
+
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+
+- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/trtllm-runtime`. If you don't have access, build and push your own image:
+  ```bash
+  ./container/build.sh --framework tensorrtllm
+  # Tag and push to your container registry
+  # Update the image references in the YAML files
+  ```
+
+- **Port Forwarding**: After deployment, forward the frontend service to access the API:
+  ```bash
+  kubectl port-forward deployment/trtllm-v1-disagg-frontend-<pod-uuid-info> 8080:8000
+  ```
+
+#### Deploy to Kubernetes
+
+Example with disagg:
+Export the NAMESPACE  you used in your Dynamo Cloud Installation.
+
+```bash
+cd dynamo
+cd components/backends/trtllm/deploy
+kubectl apply -f disagg.yaml -n $NAMESPACE
+```
+
+To change `DYN_LOG` level, edit the yaml file by adding
+
+```yaml
+...
+spec:
+  envs:
+    - name: DYN_LOG
+      value: "debug" # or other log levels
+  ...
+```
+
+### Client
+
+See [client](../llm/README.md#client) section to learn how to send request to the deployment.
+
+NOTE: To send a request to a multi-node deployment, target the node which is running `dynamo-run in=http`.
+
+### Benchmarking
+
+To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+`model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
+
+
 ## Disaggregation Strategy
 
 The disaggregation strategy controls how requests are distributed between the prefill and decode workers in a disaggregated deployment.
@@ -204,19 +263,13 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 ## Request Migration
 
-In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the Frontend and the Backend.
+You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
-The Frontend will automatically track which Backends are having connectivity issues with it and avoid routing new requests to the Backends with known connectivity issues.
-
-For ongoing requests, there is a `--migration-limit` flag which can be set on the Backend that tells the Frontend how many times a request can be migrated to another Backend should there be a loss of connectivity to the current Backend.
-
-For example,
 ```bash
 python3 -m dynamo.trtllm ... --migration-limit=3
 ```
-indicates a request to this model may be migrated up to 3 times to another Backend, before failing the request, should the Frontend detects a connectivity issue to the current Backend.
 
-The migrated request will continue responding to the original request, allowing for a seamless transition between Backends, and a reduced overall request failure rate at the Frontend for enhanced user experience.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
 
 ## Client
 
