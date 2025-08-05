@@ -21,7 +21,7 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Support Matrix](docs/support_matrix.md)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Support Matrix](docs/support_matrix.md)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |  **[Containers & Helm Charts](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamos)**
 
 # NVIDIA Dynamo
 
