@@ -35,14 +35,14 @@ mod lease;
 mod metrics;
 mod path;
 
-use crate::component::INSTANCE_ROOT_PATH;
+use crate::component::{Endpoint, INSTANCE_ROOT_PATH};
 use lease::*;
 use metrics::*;
 pub use path::*;
 
-const NAMESPACE: &str = "system";
-const COMPONENT: &str = "etcd";
-const ENDPOINT: &str = "client";
+pub const METRICS_NAMESPACE: &str = "system";
+pub const METRICS_COMPONENT: &str = "etcd";
+pub const METRICS_ENDPOINT: &str = "client";
 
 //pub use etcd::ConnectOptions as EtcdConnectOptions;
 
@@ -52,7 +52,7 @@ pub struct Client {
     client: etcd_client::Client,
     primary_lease: i64,
     runtime: Runtime,
-    metrics: Arc<OnceLock<Arc<EtcdMetrics>>>,
+    metrics: Option<EtcdMetrics>,
 }
 
 #[derive(Debug, Clone)]
@@ -137,20 +137,13 @@ impl Client {
             client,
             primary_lease: lease_id,
             runtime,
-            metrics: Arc::new(OnceLock::new()),
+            metrics: None,
         })
     }
 
     /// Initializes the metrics for the etcd client.
-    /// This MUST be called after the DistributedRuntime is fully constructed.
-    pub async fn init_metrics(&self, drt: &crate::DistributedRuntime) -> Result<()> {
-        // Create the metrics object first
-        let endpoint = drt
-            .namespace(NAMESPACE)?
-            .component(COMPONENT)?
-            .endpoint(ENDPOINT);
-        let metrics =
-            Arc::new(EtcdMetrics::from_endpoint(&endpoint).map_err(|e| anyhow::anyhow!(e))?);
+    pub async fn init_metrics(&mut self, endpoint: Endpoint) -> Result<()> {
+        let metrics = EtcdMetrics::from_endpoint(&endpoint)?;
 
         // Scan etcd for existing instances to backfill metrics
         let existing_instances = self.kv_get_prefix(INSTANCE_ROOT_PATH).await?;
@@ -169,10 +162,7 @@ impl Client {
             total_initial_bytes
         );
 
-        // Set the metrics, fail if already initialized
-        self.metrics
-            .set(metrics)
-            .map_err(|_| anyhow::anyhow!("Metrics already initialized"))?;
+        self.metrics = Some(metrics);
         Ok(())
     }
 
@@ -235,7 +225,7 @@ impl Client {
         let result = self.client.kv_client().txn(txn).await?;
 
         if result.succeeded() {
-            if let Some(metrics) = self.metrics.get() {
+            if let Some(metrics) = self.metrics.as_ref() {
                 metrics.etcd_block_total.inc();
                 metrics.etcd_block_bytes_total.add(value_len);
             }
@@ -279,7 +269,7 @@ impl Client {
 
         // We have to enumerate the response paths to determine if the transaction succeeded
         if result.succeeded() {
-            if let Some(metrics) = self.metrics.get() {
+            if let Some(metrics) = self.metrics.as_ref() {
                 metrics.etcd_block_total.inc();
                 metrics.etcd_block_bytes_total.add(value.len() as i64);
             }
@@ -315,7 +305,7 @@ impl Client {
 
         match result {
             Ok(_) => {
-                if let Some(metrics) = self.metrics.get() {
+                if let Some(metrics) = self.metrics.as_ref() {
                     metrics.etcd_block_total.inc();
                     metrics.etcd_block_bytes_total.add(value_len);
                 }
@@ -343,7 +333,7 @@ impl Client {
 
         match result {
             Ok(resp) => {
-                if let Some(metrics) = self.metrics.get() {
+                if let Some(metrics) = self.metrics.as_ref() {
                     metrics.etcd_block_total.inc();
                     metrics.etcd_block_bytes_total.add(value_len);
                 }
@@ -379,7 +369,7 @@ impl Client {
         match result {
             Ok(del_response) => {
                 let deleted_count = del_response.deleted();
-                if let Some(metrics) = self.metrics.get() {
+                if let Some(metrics) = self.metrics.as_ref() {
                     if deleted_count > 0 {
                         let prev_kvs = del_response.prev_kvs();
                         let total_bytes_deleted =

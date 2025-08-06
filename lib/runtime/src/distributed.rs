@@ -113,8 +113,17 @@ impl DistributedRuntime {
             system_health,
         };
 
-        if let Some(etcd_client) = &distributed_runtime.etcd_client {
-            etcd_client.init_metrics(&distributed_runtime).await?;
+        if distributed_runtime.etcd_client.is_some() {
+            let etcd_metrics_endpoint = distributed_runtime
+                .namespace(crate::transports::etcd::METRICS_NAMESPACE)?
+                .component(crate::transports::etcd::METRICS_COMPONENT)?
+                .endpoint(crate::transports::etcd::METRICS_ENDPOINT);
+            distributed_runtime
+                .etcd_client
+                .as_mut()
+                .unwrap() // Safety: We checked two lines above
+                .init_metrics(etcd_metrics_endpoint)
+                .await?;
         }
 
         if let Some(etcd_client) = distributed_runtime.etcd_client.take() {
