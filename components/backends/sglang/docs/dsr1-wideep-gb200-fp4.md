@@ -17,10 +17,10 @@ limitations under the License.
 
 # Running DeepSeek-R1 Disaggregated with WideEP on GB200s (NVFP4)
 
-Together with the SGLang team, we have implemented NVFP4 support for DeepSeek-R1 on Blackwell GPUs! While many performance optimization are still ongoing, we wanted to provide an initial recipe that allows you to deploy the WideEP + P/D disaggregation setup in NVFP4! For now we provide instructions for 1 node prefill and 1 node decode. If you want to manually test a larger setup, you can set the following CLI flags:
+Together with the SGLang team, we have implemented NVFP4 support for DeepSeek-R1 on Blackwell GPUs! While many performance optimization are still ongoing, we wanted to provide an initial recipe that allows you to deploy the WideEP + P/D disaggregation setup in NVFP4! For now we provide instructions for 1 node prefill and 1 node decode. If you want to manually test a larger setup, you can set and edit the following CLI flags. Take a look at the [GB200-FP8 instructions](dsr1-wideep-gb200-fp8.md) for more details.
 
 ```bash
---dist-init-addr 
+--dist-init-addr
 --nnodes
 --node-rank
 --tp-size
@@ -30,17 +30,17 @@ Together with the SGLang team, we have implemented NVFP4 support for DeepSeek-R1
 <details>
 <summary>Some SGLang PRs that should improve performance</summary>
 
-- [#7667](https://github.com/sgl-project/sglang/pull/7667): Add `--enable-flashinfer-fp4-allgather` for FlashInfer cutlass MoE DP (max throughput)  
+- [#7667](https://github.com/sgl-project/sglang/pull/7667): Add `--enable-flashinfer-fp4-allgather` for FlashInfer cutlass MoE DP (max throughput)
   _10% e2e speedup_
 - [#8638](https://github.com/sgl-project/sglang/pull/8638): FP8 KV Cache
-- [#8588](https://github.com/sgl-project/sglang/pull/8588): Use FlashInfer's TRTLLM FP8 Blockscale GEMM  
+- [#8588](https://github.com/sgl-project/sglang/pull/8588): Use FlashInfer's TRTLLM FP8 Blockscale GEMM
   _6% e2e improvement for low latency_
-- [#8280](https://github.com/sgl-project/sglang/pull/8280): Enables all-gather for DP when using padding  
-  [#8539](https://github.com/sgl-project/sglang/pull/): Similar PR enables reducescatter instead of all-reduce following MOE/MLP layers in DeepSeek  
+- [#8280](https://github.com/sgl-project/sglang/pull/8280): Enables all-gather for DP when using padding
+  [#8539](https://github.com/sgl-project/sglang/pull/): Similar PR enables reducescatter instead of all-reduce following MOE/MLP layers in DeepSeek
   _5% e2e improvement_
 - [#8811](https://github.com/sgl-project/sglang/pull/8811): Fix trtllm_fp4_block_scale_moe API routing_logits dim check (num_experts consistency)
 - [#8770](https://github.com/sgl-project/sglang/pull/8770): Add changes required for unit tests in fused routed scaling
-- [#8690](https://github.com/sgl-project/sglang/pull/8690): [2/2] SGLang: Fuse routed scaling factor into select_experts 
+- [#8690](https://github.com/sgl-project/sglang/pull/8690): [2/2] SGLang: Fuse routed scaling factor into select_experts
   _Fuse multiply by routed_scaling_factor into select_experts, following TRT-LLM. 10% speed up on low latency_
 - [#8330](https://github.com/sgl-project/sglang/pull/8330): Add unit test for flashinfer fp4 moe
 
