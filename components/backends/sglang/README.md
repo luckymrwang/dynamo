@@ -174,7 +174,8 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Large scale P/D disaggregation with WideEP
 - **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
-- **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
+- **[Run DeepSeek-R1-FP8 on GB200s](docs/dsr1-wideep-gb200-fp8.md)**
+- **[Run DeepSeek-R1-FP4 on GB200s](docs/dsr1-wideep-gb200-fp4.md)**
 
 ### Supporting SGLang's native endpoints via Dynamo
 - **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
