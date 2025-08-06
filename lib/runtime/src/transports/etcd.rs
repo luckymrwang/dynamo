@@ -20,7 +20,7 @@ use derive_builder::Builder;
 use derive_getters::Dissolve;
 use futures::StreamExt;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tokio::sync::{mpsc, RwLock};
 use validator::Validate;
 
@@ -32,10 +32,17 @@ pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{interval, Duration};
 
 mod lease;
+mod metrics;
 mod path;
 
+use crate::component::INSTANCE_ROOT_PATH;
 use lease::*;
+use metrics::*;
 pub use path::*;
+
+const NAMESPACE: &str = "system";
+const COMPONENT: &str = "etcd";
+const ENDPOINT: &str = "client";
 
 //pub use etcd::ConnectOptions as EtcdConnectOptions;
 
@@ -45,6 +52,7 @@ pub struct Client {
     client: etcd_client::Client,
     primary_lease: i64,
     runtime: Runtime,
+    metrics: Arc<OnceLock<Arc<EtcdMetrics>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -129,7 +137,43 @@ impl Client {
             client,
             primary_lease: lease_id,
             runtime,
+            metrics: Arc::new(OnceLock::new()),
         })
+    }
+
+    /// Initializes the metrics for the etcd client.
+    /// This MUST be called after the DistributedRuntime is fully constructed.
+    pub async fn init_metrics(&self, drt: &crate::DistributedRuntime) -> Result<()> {
+        // Create the metrics object first
+        let endpoint = drt
+            .namespace(NAMESPACE)?
+            .component(COMPONENT)?
+            .endpoint(ENDPOINT);
+        let metrics =
+            Arc::new(EtcdMetrics::from_endpoint(&endpoint).map_err(|e| anyhow::anyhow!(e))?);
+
+        // Scan etcd for existing instances to backfill metrics
+        let existing_instances = self.kv_get_prefix(INSTANCE_ROOT_PATH).await?;
+        let total_initial_count = existing_instances.len() as i64;
+        let total_initial_bytes = existing_instances
+            .iter()
+            .map(|kv| kv.value().len() as i64)
+            .sum::<i64>();
+
+        metrics.etcd_block_total.add(total_initial_count);
+        metrics.etcd_block_bytes_total.add(total_initial_bytes);
+
+        tracing::info!(
+            "Initialized etcd metrics: initial_count={}, initial_bytes={}",
+            total_initial_count,
+            total_initial_bytes
+        );
+
+        // Set the metrics, fail if already initialized
+        self.metrics
+            .set(metrics)
+            .map_err(|_| anyhow::anyhow!("Metrics already initialized"))?;
+        Ok(())
     }
 
     /// Get a reference to the underlying [`etcd_client::Client`] instance.
@@ -176,6 +220,7 @@ impl Client {
         value: Vec<u8>,
         lease_id: Option<i64>,
     ) -> Result<()> {
+        let value_len = value.len() as i64;
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id);
 
@@ -190,6 +235,10 @@ impl Client {
         let result = self.client.kv_client().txn(txn).await?;
 
         if result.succeeded() {
+            if let Some(metrics) = self.metrics.get() {
+                metrics.etcd_block_total.inc();
+                metrics.etcd_block_bytes_total.add(value_len);
+            }
             Ok(())
         } else {
             for resp in result.op_responses() {
@@ -230,6 +279,10 @@ impl Client {
 
         // We have to enumerate the response paths to determine if the transaction succeeded
         if result.succeeded() {
+            if let Some(metrics) = self.metrics.get() {
+                metrics.etcd_block_total.inc();
+                metrics.etcd_block_bytes_total.add(value.len() as i64);
+            }
             Ok(())
         } else {
             match result.op_responses().first() {
@@ -251,14 +304,25 @@ impl Client {
         value: impl AsRef<[u8]>,
         lease_id: Option<i64>,
     ) -> Result<()> {
+        let value_len = value.as_ref().len() as i64;
         let id = lease_id.unwrap_or(self.lease_id());
         let put_options = PutOptions::new().with_lease(id);
-        let _ = self
+        let result = self
             .client
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(put_options))
-            .await?;
-        Ok(())
+            .await;
+
+        match result {
+            Ok(_) => {
+                if let Some(metrics) = self.metrics.get() {
+                    metrics.etcd_block_total.inc();
+                    metrics.etcd_block_bytes_total.add(value_len);
+                }
+                Ok(())
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn kv_put_with_options(
@@ -267,14 +331,26 @@ impl Client {
         value: impl AsRef<[u8]>,
         options: Option<PutOptions>,
     ) -> Result<PutResponse> {
+        let value_len = value.as_ref().len() as i64;
         let options = options
             .unwrap_or_default()
             .with_lease(self.primary_lease().id());
-        self.client
+        let result = self
+            .client
             .kv_client()
             .put(key.as_ref(), value.as_ref(), Some(options))
-            .await
-            .map_err(|err| err.into())
+            .await;
+
+        match result {
+            Ok(resp) => {
+                if let Some(metrics) = self.metrics.get() {
+                    metrics.etcd_block_total.inc();
+                    metrics.etcd_block_bytes_total.add(value_len);
+                }
+                Ok(resp)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn kv_get(
@@ -291,12 +367,33 @@ impl Client {
         key: impl Into<Vec<u8>>,
         options: Option<DeleteOptions>,
     ) -> Result<i64> {
-        self.client
+        // To correctly decrement metrics, we need to know the size of what was deleted.
+        // The `with_prev_kv` option makes the delete operation return the deleted key-value pairs.
+        let options = options.unwrap_or_default().with_prev_key();
+        let key_bytes = key.into();
+        let result = self
+            .client
             .kv_client()
-            .delete(key, options)
-            .await
-            .map(|del_response| del_response.deleted())
-            .map_err(|err| err.into())
+            .delete(key_bytes, Some(options))
+            .await;
+        match result {
+            Ok(del_response) => {
+                let deleted_count = del_response.deleted();
+                if let Some(metrics) = self.metrics.get() {
+                    if deleted_count > 0 {
+                        let prev_kvs = del_response.prev_kvs();
+                        let total_bytes_deleted =
+                            prev_kvs.iter().map(|kv| kv.value().len()).sum::<usize>();
+                        metrics.etcd_block_total.sub(prev_kvs.len() as i64);
+                        metrics
+                            .etcd_block_bytes_total
+                            .sub(total_bytes_deleted as i64);
+                    }
+                }
+                Ok(deleted_count)
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {

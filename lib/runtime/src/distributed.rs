@@ -97,7 +97,7 @@ impl DistributedRuntime {
             live_endpoint_path,
         )));
 
-        let distributed_runtime = Self {
+        let mut distributed_runtime = Self {
             runtime,
             etcd_client,
             nats_client,
@@ -112,6 +112,15 @@ impl DistributedRuntime {
             >::new())),
             system_health,
         };
+
+        if let Some(etcd_client) = &distributed_runtime.etcd_client {
+            etcd_client.init_metrics(&distributed_runtime).await?;
+        }
+
+        if let Some(etcd_client) = distributed_runtime.etcd_client.take() {
+            etcd_client.init_metrics(&distributed_runtime).await?;
+            distributed_runtime.etcd_client = Some(etcd_client);
+        }
 
         // Start metrics server if enabled
         if let Some(cancel_token) = cancel_token {
