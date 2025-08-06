@@ -164,6 +164,18 @@ git config --local gpg.program gpg1
 
 > Warning: Switching local gpg to gpg1 can have ramifications when you are not in the container any longer.
 
+### Custom devcontainer.json Configuration
+
+You can create a custom devcontainer configuration by copying the main configuration to another directory:
+
+```bash
+# Copy the main devcontainer configuration and then edit the new json file
+mkdir -p .devcontainer/my_custom
+cp .devcontainer/devcontainer.json .devcontainer/my_custom/devcontainer.json
+```
+
+Common customizations include additional mounts, environment variables, VS Code extensions, and build arguments. When you open a new Dev Container, you can pick from any of the `.devcontainer/*/devcontainer.json` files available.
+
 ### SSH Keys for Git Operations
 
 To use `git push` commands in the devcontainer, you need SSH keys set up inside the container. This is not done automatically for security reasons - it's up to you to decide whether you want to copy your SSH keys from the host.
