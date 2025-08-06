@@ -17,10 +17,18 @@ limitations under the License.
 
 # Running DeepSeek-R1 Disaggregated with WideEP on GB200s (NVFP4)
 
-Together with the SGLang team, we have implemented NVFP4 support for DeepSeek-R1 on Blackwell GPUs! While many performance optimization are still ongoing, we wanted to provide an initial recipe that allows you to deploy the WideEP + P/D disaggregation setup in NVFP4!
+Together with the SGLang team, we have implemented NVFP4 support for DeepSeek-R1 on Blackwell GPUs! While many performance optimization are still ongoing, we wanted to provide an initial recipe that allows you to deploy the WideEP + P/D disaggregation setup in NVFP4! For now we provide instructions for 1 node prefill and 1 node decode. If you want to manually test a larger setup, you can set the following CLI flags:
+
+```bash
+--dist-init-addr 
+--nnodes
+--node-rank
+--tp-size
+--dp-size
+```
 
 <details>
-<summary>Some SGLangPRs that should improve performance</summary>
+<summary>Some SGLang PRs that should improve performance</summary>
 
 - [#7667](https://github.com/sgl-project/sglang/pull/7667): Add `--enable-flashinfer-fp4-allgather` for FlashInfer cutlass MoE DP (max throughput)  
   _10% e2e speedup_
@@ -74,4 +82,118 @@ docker build \
   .
 ```
 
-3. 
+3. Build the Dynamo container
+
+```bash
+cd $DYNAMO_ROOT
+docker build \
+  -f container/Dockerfile.sglang-wideep \
+  -t dynamo-wideep-gb200 \
+  --build-arg MODE=blackwell \
+  --build-arg SGLANG_IMAGE=sgl-blackwell-wideep-8811:latest \
+  --build-arg ARCH=arm64 \
+  --build-arg ARCH_ALT=aarch64 \
+  .
+```
+
+4. You can run this container on each 4xGB200 node using the following command.
+
+> [!IMPORTANT]
+> We recommend downloading DeepSeek-R1 and then mounting it to the container. You can find the FP4 model [here](https://huggingface.co/nvidia/DeepSeek-R1-0528-FP4)
+
+```bash
+docker run \
+    --gpus all \
+    -it \
+    --rm \
+    --network host \
+    --volume /PATH_TO_DSR1_MODEL/:/model/ \
+    --shm-size=10G \
+    --ulimit memlock=-1 \
+    --ulimit stack=67108864 \
+    --ulimit nofile=65536:65536 \
+    --cap-add CAP_SYS_PTRACE \
+    --ipc host \
+    dynamo-wideep-gb200:latest
+```
+
+5. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
+
+```bash
+./utils/gen_env_vars.sh
+```
+
+6. Run the ingress and prefill worker
+
+```bash
+# run ingress
+python3 -m dynamo.frontend --http-port=8000 &
+# run prefill worker
+MC_TE_METRIC=true \
+MC_FORCE_MNNVL=1 \
+NCCL_MNNVL_ENABLE=1 \
+NCCL_CUMEM_ENABLE=1 \
+SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
+SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
+PYTHONUNBUFFERED=1 \
+python3 -m dynamo.sglang.worker \
+    --disaggregation-transfer-backend nixl \
+    --disaggregation-mode prefill \
+    --host 0.0.0.0 \
+    --decode-log-interval 1 \
+    --max-running-requests 1536 \
+    --context-length 4224 \
+    --disable-radix-cache \
+    --disable-shared-experts-fusion \
+    --attention-backend cutlass_mla \
+    --watchdog-timeout 1000000 \
+    --model-path /model/ \
+    --served-model-name nvidia/DeepSeek-R1-0528-FP4 \
+    --trust-remote-code \
+    --tp-size 4 \
+    --dp-size 4 \
+    --enable-dp-attention \
+    --disable-cuda-graph \
+    --chunked-prefill-size 32768 \
+    --max-total-tokens 131072 \
+    --max-prefill-tokens 32768 \
+    --quantization modelopt_fp4 \
+    --enable-flashinfer-cutlass-moe \
+    --enable-ep-moe
+```
+
+7. Run the decode worker
+
+```bash
+MC_TE_METRIC=1 \
+NCCL_MNNVL_ENABLE=1 \
+MC_FORCE_MNNVL=1 \
+NCCL_CUMEM_ENABLE=1 \
+SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
+PYTHONUNBUFFERED=1 \
+python3 -m dynamo.sglang.decode_worker \
+    --disaggregation-transfer-backend nixl \
+    --disaggregation-mode decode \
+    --host 0.0.0.0 \
+    --decode-log-interval 1 \
+    --max-running-requests 1536 \
+    --context-length 4224 \
+    --max-total-tokens=2048 \
+    --disable-radix-cache \
+    --disable-shared-experts-fusion \
+    --attention-backend cutlass_mla \
+    --watchdog-timeout 1000000 \
+    --model-path /model/ \
+    --served-model-name nvidia/DeepSeek-R1-0528-FP4 \
+    --trust-remote-code \
+    --dist-init-addr "$HOST_IP:$PORT" \
+    --disaggregation-bootstrap-port 30001 \
+    --tp-size 4 \
+    --dp-size 4 \
+    --enable-dp-attention \
+    --cuda-graph-bs 64 \
+    --port 30000 \
+    --quantization modelopt_fp4 \
+    --enable-flashinfer-trtllm-moe \
+    --enable-ep-moe
+```

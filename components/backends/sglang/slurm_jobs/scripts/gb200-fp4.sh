@@ -85,6 +85,12 @@ if [ "$mode" = "prefill" ]; then
         python3 -m sglang.launch_server \
             --disaggregation-transfer-backend nixl \
             --disaggregation-mode prefill \
+            --dist-init-addr "$HOST_IP:$PORT" \
+            --disaggregation-bootstrap-port 30001 \
+            --nnodes "$TOTAL_NODES" \
+            --node-rank "$RANK" \
+            --tp-size "$TOTAL_GPUS" \
+            --dp-size "$TOTAL_GPUS" \
             --host 0.0.0.0 \
             --decode-log-interval 1 \
             --max-running-requests 1536 \
@@ -96,8 +102,6 @@ if [ "$mode" = "prefill" ]; then
             --model-path /model/ \
             --served-model-name nvidia/DeepSeek-R1-0528-FP4 \
             --trust-remote-code \
-            --tp-size 4 \
-            --dp-size 4 \
             --enable-dp-attention \
             --disable-cuda-graph \
             --chunked-prefill-size 32768 \
@@ -105,7 +109,7 @@ if [ "$mode" = "prefill" ]; then
             --port 30000 \
             --max-prefill-tokens 32768 \
             --quantization modelopt_fp4 \
-            --enable-flashinfer-cutlass-moe \
+            --enable-flashinfer-trtllm-moe \
             --enable-ep-moe
     fi
 elif [ "$mode" = "decode" ]; then
@@ -145,7 +149,7 @@ elif [ "$mode" = "decode" ]; then
             --cuda-graph-bs 64 \
             --port 30000 \
             --quantization modelopt_fp4 \
-            --enable-flashinfer-cutlass-moe \
+            --enable-flashinfer-trtllm-moe \
             --enable-ep-moe
     fi
 fi
