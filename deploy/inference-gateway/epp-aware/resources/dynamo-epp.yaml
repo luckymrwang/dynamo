@@ -15,19 +15,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dynamo-qwen-epp
+  name: qwen-epp
   namespace: default
   labels:
-    app: dynamo-qwen-epp
+    app: qwen-epp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: dynamo-qwen-epp
+      app: qwen-epp
   template:
     metadata:
       labels:
-        app: dynamo-qwen-epp
+        app: qwen-epp
     spec:
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
@@ -65,3 +65,10 @@ spec:
             service: inference-extension
           initialDelaySeconds: 5
           periodSeconds: 10
+      - # --- FrontEnd sidecar container ---
+      - name: frontend
+        image: dynamo-image:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+          - containerPort: 8000
+
