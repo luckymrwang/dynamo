@@ -30,10 +30,9 @@ Together with the SGLang team, we have implemented NVFP4 support for DeepSeek-R1
 - [#8280](https://github.com/sgl-project/sglang/pull/8280): Enables all-gather for DP when using padding  
   [#8539](https://github.com/sgl-project/sglang/pull/): Similar PR enables reducescatter instead of all-reduce following MOE/MLP layers in DeepSeek  
   _5% e2e improvement_
-- [#8811](https://github.com/sgl-project/sglang/pull/8539): Hotfix for [#8779](https://github.com/sgl-project/sglang/pull/8779) (Ian Wang)
 - [#8811](https://github.com/sgl-project/sglang/pull/8811): Fix trtllm_fp4_block_scale_moe API routing_logits dim check (num_experts consistency)
 - [#8770](https://github.com/sgl-project/sglang/pull/8770): Add changes required for unit tests in fused routed scaling
-- [#8690](https://github.com/sgl-project/sglang/pull/8690): [2/2] SGLang: Fuse routed scaling factor into select_experts (Trevor Morris)  
+- [#8690](https://github.com/sgl-project/sglang/pull/8690): [2/2] SGLang: Fuse routed scaling factor into select_experts 
   _Fuse multiply by routed_scaling_factor into select_experts, following TRT-LLM. 10% speed up on low latency_
 - [#8330](https://github.com/sgl-project/sglang/pull/8330): Add unit test for flashinfer fp4 moe
 
