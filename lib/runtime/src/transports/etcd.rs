@@ -40,10 +40,6 @@ use lease::*;
 use metrics::*;
 pub use path::*;
 
-pub const METRICS_NAMESPACE: &str = "system";
-pub const METRICS_COMPONENT: &str = "etcd";
-pub const METRICS_ENDPOINT: &str = "client";
-
 //pub use etcd::ConnectOptions as EtcdConnectOptions;
 
 /// ETCD Client
@@ -142,8 +138,8 @@ impl Client {
     }
 
     /// Initializes the metrics for the etcd client.
-    pub async fn init_metrics(&mut self, endpoint: Endpoint) -> Result<()> {
-        let metrics = EtcdMetrics::from_endpoint(&endpoint)?;
+    pub async fn init_metrics(&mut self, drt: &crate::DistributedRuntime) -> Result<()> {
+        let metrics = EtcdMetrics::from_distributed_runtime(drt)?;
 
         // Scan etcd for existing instances to backfill metrics
         let existing_instances = self.kv_get_prefix(INSTANCE_ROOT_PATH).await?;

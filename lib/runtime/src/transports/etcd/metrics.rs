@@ -20,14 +20,14 @@ impl EtcdMetrics {
         }
     }
 
-    pub fn from_endpoint(endpoint: &crate::component::Endpoint) -> anyhow::Result<Self> {
-        let etcd_block_total = endpoint.create_intgauge(
+    pub fn from_distributed_runtime(drt: &crate::DistributedRuntime) -> anyhow::Result<Self> {
+        let etcd_block_total = drt.create_intgauge(
             "etcd_block_total",
             "Total number of etcd key-value pairs processed",
             &[],
         )?;
 
-        let etcd_block_bytes_total = endpoint.create_intgauge(
+        let etcd_block_bytes_total = drt.create_intgauge(
             "etcd_block_bytes_total",
             "Total number of bytes processed in etcd blocks",
             &[],
