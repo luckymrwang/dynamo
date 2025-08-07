@@ -26,6 +26,7 @@ spec:
     - group: inference.networking.x-k8s.io
       kind: InferencePool
       name: qwen-pool
+      port: 8000
     matches:
     - path:
         type: PathPrefix

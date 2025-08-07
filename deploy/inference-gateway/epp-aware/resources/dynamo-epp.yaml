@@ -36,9 +36,9 @@ spec:
         image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.0.1
         imagePullPolicy: IfNotPresent
         args:
-        - -poolName
+        - "--poolName"
         - "dynamo-qwen"
-        - "-poolNamespace"
+        - "--poolNamespace"
         - "default"
         - -v
         - "4"
@@ -70,6 +70,11 @@ spec:
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh", "-c"]
         args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
+        env:
+        - name: ETCD_ENDPOINTS
+          value: "http://dynamo-platform-etcd:2379"
+        - name: NATS_SERVER
+          value: "nats://dynamo-platform-nats:4222"
         ports:
           - containerPort: 8000
         resources:
