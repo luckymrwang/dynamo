@@ -97,31 +97,32 @@ impl DistributedRuntime {
             live_endpoint_path,
         )));
 
-        let mut distributed_runtime = Self {
-            runtime,
-            etcd_client,
-            nats_client,
-            tcp_server: Arc::new(OnceCell::new()),
-            metrics_server: Arc::new(OnceLock::new()),
-            component_registry: component::Registry::new(),
-            is_static,
-            instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
-                String,
-                prometheus::Registry,
-            >::new())),
-            system_health,
+        let distributed_runtime = {
+            // There is a circular reference between DistributedRuntime and etcd::Client.
+            // We use mutable in order to take/putback etcd_client.
+            let mut drt = Self {
+                runtime,
+                etcd_client,
+                nats_client,
+                tcp_server: Arc::new(OnceCell::new()),
+                metrics_server: Arc::new(OnceLock::new()),
+                component_registry: component::Registry::new(),
+                is_static,
+                instance_sources: Arc::new(Mutex::new(HashMap::new())),
+                prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
+                    String,
+                    prometheus::Registry,
+                >::new(
+                ))),
+                system_health,
+            };
+            // Note that transports::etcd::Client does not implement Clone.
+            if let Some(mut etcd_client) = drt.etcd_client.take() {
+                etcd_client.init_metrics(&drt.clone()).await?;
+                drt.etcd_client = Some(etcd_client);
+            }
+            drt
         };
-
-        if let Some(mut etcd_client) = distributed_runtime.etcd_client.take() {
-            etcd_client.init_metrics(&distributed_runtime).await?;
-            distributed_runtime.etcd_client = Some(etcd_client);
-        }
-
-        if let Some(mut etcd_client) = distributed_runtime.etcd_client.take() {
-            etcd_client.init_metrics(&distributed_runtime).await?;
-            distributed_runtime.etcd_client = Some(etcd_client);
-        }
 
         // Start metrics server if enabled
         if let Some(cancel_token) = cancel_token {

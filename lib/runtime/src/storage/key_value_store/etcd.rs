@@ -403,3 +403,217 @@ mod concurrent_create_tests {
         Ok(())
     }
 }
+
+// run with: cd /home/ubuntu/dynamo && cargo test --locked test_etcd_system_stats_server -- --nocapture
+#[cfg(test)]
+mod etcd_metrics_test {
+    use super::*;
+    use crate::component::INSTANCE_ROOT_PATH;
+    use crate::pipeline::{
+        async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
+        ResponseStream, SingleIn,
+    };
+    use crate::protocols::annotated::Annotated;
+    use crate::stream;
+    use crate::{distributed::DistributedConfig, DistributedRuntime, Runtime};
+    use reqwest;
+    use std::env;
+    use std::sync::Arc;
+    use tokio::time::{sleep, Duration};
+    use uuid::Uuid;
+
+    const TEST_NAMESPACE: &str = "testnamespace";
+    const TEST_COMPONENT: &str = "testcomponent";
+    const TEST_ENDPOINT: &str = "testendpoint";
+
+    struct TestRequestHandler {}
+
+    impl TestRequestHandler {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {})
+        }
+    }
+
+    #[async_trait]
+    impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for TestRequestHandler {
+        async fn generate(
+            &self,
+            input: SingleIn<String>,
+        ) -> crate::Result<ManyOut<Annotated<String>>> {
+            let (data, ctx) = input.into_parts();
+
+            let chars = data
+                .chars()
+                .map(|c| Annotated::from_data(c.to_string()))
+                .collect::<Vec<_>>();
+
+            let stream = stream::iter(chars);
+
+            Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
+        }
+    }
+
+    async fn backend(drt: DistributedRuntime) -> crate::Result<()> {
+        // Create a namespace, component, service, and endpoint like the backend examples
+        let ingress = Ingress::for_engine(TestRequestHandler::new())?;
+
+        let endpoint = drt
+            .namespace(TEST_NAMESPACE)?
+            .component(TEST_COMPONENT)?
+            .service_builder()
+            .create()
+            .await?
+            .endpoint(TEST_ENDPOINT);
+
+        // Start the endpoint with the ingress handler
+        endpoint.endpoint_builder().handler(ingress).start().await?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_etcd_system_stats_server() {
+        // Test direct etcd client operations. Generate bogus instances on etcd.
+        let rt = Runtime::from_settings().unwrap();
+        let rt_clone = rt.clone();
+
+        rt_clone.primary().block_on(async move {
+            // Create first drt for etcd operations
+            let drt1 =
+                DistributedRuntime::new(rt_clone.clone(), DistributedConfig::from_settings(false))
+                    .await
+                    .unwrap();
+            let etcd_client = drt1.etcd_client().expect("etcd client should be available");
+
+            // Test kv_create - create 10 deterministic keys
+            let mut created_keys = Vec::new();
+            for i in 0..10 {
+                let key = format!(
+                    "{}/dynamo/deleteme_test/generate:{:02}",
+                    INSTANCE_ROOT_PATH, i
+                );
+                let value = format!("deterministic_value_{:02}", i);
+                let value_bytes = value.as_bytes().to_vec();
+
+                println!("Testing kv_create with key: '{}', value: '{}'", key, value);
+                etcd_client
+                    .kv_create(key.clone(), value_bytes, None)
+                    .await
+                    .map_err(|e| StorageError::EtcdError(e.to_string()))
+                    .unwrap();
+                println!("Successfully created key via kv_create: {}", key);
+                created_keys.push(key);
+            }
+
+            // Set environment variables for dynamic port allocation BEFORE creating the runtime
+            std::env::set_var("DYN_SYSTEM_ENABLED", "true");
+            std::env::set_var("DYN_SYSTEM_PORT", "0");
+
+            // Create second drt for system stats server test
+            let drt2 = DistributedRuntime::new(rt_clone, DistributedConfig::from_settings(false))
+                .await
+                .unwrap();
+            test_system_stats_server(drt2).await.unwrap();
+
+            // Clean up created keys
+            for key in created_keys {
+                etcd_client
+                    .kv_delete(key.as_bytes(), None)
+                    .await
+                    .map_err(|e| StorageError::EtcdError(e.to_string()))
+                    .unwrap();
+                println!("Deleted key: {}", key);
+            }
+        });
+    }
+
+    async fn test_system_stats_server(drt: DistributedRuntime) -> Result<(), StorageError> {
+        // Get the system stats server info to find the actual port
+        let metrics_server_info = drt.metrics_server_info();
+        let metrics_port = match metrics_server_info {
+            Some(info) => {
+                println!("System stats server running on: {}", info.address());
+                info.port()
+            }
+            None => {
+                panic!("System stats server not started - check DYN_SYSTEM_ENABLED environment variable");
+            }
+        };
+
+        // Start the backend in a separate task (like system_metrics example)
+        let drt_clone = drt.clone();
+        let backend_handle = tokio::spawn(async move { backend(drt_clone).await });
+
+        // Give the backend some time to start up
+        sleep(Duration::from_millis(500)).await;
+
+        // Now fetch the system stats server endpoint using the dynamic port
+        let metrics_url = format!("http://localhost:{}/metrics", metrics_port);
+        println!("Fetching metrics from: {}", metrics_url);
+
+        // Make HTTP request to get metrics using reqwest
+        let client = reqwest::Client::new();
+        let response = client.get(&metrics_url).send().await;
+
+        match response {
+            Ok(response) => {
+                if response.status().is_success() {
+                    let metrics_content = response
+                        .text()
+                        .await
+                        .unwrap_or_else(|_| "Failed to read response body".to_string());
+
+                    // println!("=== METRICS CONTENT ===");
+                    // println!("{}", metrics_content);
+                    // println!("=== END METRICS CONTENT ===");
+
+                    // Verify that metrics endpoint is working
+                    assert!(
+                        !metrics_content.is_empty(),
+                        "Metrics content should not be empty"
+                    );
+
+                    // Filter to only show lines containing '_etcd_' in the metric name (not labels)
+                    let etcd_metrics: Vec<&str> = metrics_content
+                        .lines()
+                        .filter(|line| {
+                            // Only include lines that contain '_etcd_' in the metric name
+                            // (not in labels like dynamo_namespace="test_etcd_namespace")
+                            line.contains("_etcd_")
+                                && (line.starts_with("# HELP")
+                                    || line.starts_with("# TYPE")
+                                    || line.starts_with("dynamo_component_etcd_"))
+                        })
+                        .collect();
+
+                    println!("=== ETCD METRICS ONLY ===");
+                    for line in &etcd_metrics {
+                        println!("{}", line);
+                    }
+                    println!("=== END ETCD METRICS ===");
+
+                    // Check for some common metrics that should be present
+                    let has_metrics = metrics_content.contains("dynamo_")
+                        || metrics_content.contains("process_")
+                        || metrics_content.contains("go_");
+
+                    assert!(has_metrics, "Metrics content should contain some metrics");
+
+                    println!("Successfully retrieved metrics from system stats server endpoint!");
+                } else {
+                    println!("HTTP request failed with status: {}", response.status());
+                    panic!("Failed to get metrics: HTTP {}", response.status());
+                }
+            }
+            Err(e) => {
+                println!("Failed to connect to system stats server endpoint: {}", e);
+                panic!("Failed to connect to system stats server endpoint: {}", e);
+            }
+        }
+
+        // Cancel the backend task
+        backend_handle.abort();
+
+        Ok(())
+    }
+}

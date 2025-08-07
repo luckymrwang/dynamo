@@ -138,11 +138,43 @@ impl Client {
     }
 
     /// Initializes the metrics for the etcd client.
+    ///
+    /// TODO(tzulingk): The current implementation retrieves all etcd keys starting with /instances
+    /// and records the total number of keys and the cumulative size of their values across the entire etcd.
+    /// This approach is incorrect. The desired behavior is to track, for this specific DistributedRuntime,
+    /// 1) the number of etcd calls made, and 2) the total bytes transferred.
     pub async fn init_metrics(&mut self, drt: &crate::DistributedRuntime) -> Result<()> {
         let metrics = EtcdMetrics::from_distributed_runtime(drt)?;
 
         // Scan etcd for existing instances to backfill metrics
         let existing_instances = self.kv_get_prefix(INSTANCE_ROOT_PATH).await?;
+
+        // Debug output. List all existing instances. It looks like this:
+        // Key: 'instances/dynamo/backend/generate:694d985d0f41c9a4', Value: '{
+        //   "component": "backend",
+        //   "endpoint": "generate",
+        //   "namespace": "dynamo",
+        //   "instance_id": 7587888472644503972,
+        //   "transport": {
+        //     "nats_tcp": "dynamo_backend.generate-694d985d0f41c9a4"
+        //   }
+        println!(
+            "=== init_metrics: existing instances for prefix '{}' ===",
+            INSTANCE_ROOT_PATH
+        );
+        for (i, kv) in existing_instances.iter().enumerate() {
+            println!(
+                "[{}] Key: '{}', Value: '{}'",
+                i,
+                kv.key_str().unwrap_or("invalid_key"),
+                kv.value_str().unwrap_or("invalid_value")
+            );
+        }
+        println!(
+            "=== Found {} existing instances ===",
+            existing_instances.len()
+        );
+
         let total_initial_count = existing_instances.len() as i64;
         let total_initial_bytes = existing_instances
             .iter()
@@ -382,6 +414,24 @@ impl Client {
         }
     }
 
+    /// Retrieves all key-value pairs from etcd that have keys starting with the given prefix.
+    ///
+    /// Uses etcd's native prefix-based querying for efficient bulk retrieval.
+    /// Common use cases: listing component instances, bucket entries, hierarchical data.
+    ///
+    /// # Examples:
+    /// ```rust,no_run
+    /// # use dynamo_runtime::transports::etcd::Client;
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let client: Client = todo!(); // Replace with actual client creation
+    /// let instances = client.kv_get_prefix("instances/dynamo/backend/").await?;
+    /// let entries = client.kv_get_prefix("storage/testbucket/").await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Returns:
+    /// - `Result<Vec<KeyValue>>`: All matching key-value pairs
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
         let mut get_response = self
             .client
