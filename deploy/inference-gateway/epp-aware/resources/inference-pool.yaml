@@ -21,7 +21,7 @@ spec:
   targetPortNumber: 8000
   selector:
       nvidia.com/dynamo-component: Frontend
-      nvidia.com/dynamo-namespace: vllm-v1-agg
+      nvidia.com/dynamo-namespace: vllm-agg
   extensionRef:
     group: ""
     kind: Service

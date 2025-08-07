@@ -39,7 +39,7 @@ spec:
             - /bin/sh
             - -c
             - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-      dynamoNamespace: vllm-v1-agg
+      dynamoNamespace: vllm-agg
       componentType: main
       labels:
         nvidia.com/dynamo-component: Frontend
@@ -81,7 +81,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: vllm-v1-agg
+      dynamoNamespace: vllm-agg
       componentType: worker
       replicas: 1
       resources:
