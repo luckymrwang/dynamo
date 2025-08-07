@@ -16,7 +16,6 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: qwen-epp
-  namespace: default
   labels:
     app: qwen-epp
 spec:
