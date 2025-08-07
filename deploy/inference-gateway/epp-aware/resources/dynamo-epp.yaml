@@ -28,7 +28,8 @@ spec:
       labels:
         app: qwen-epp
     spec:
-      # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
+      imagePullSecrets:
+        - name: docker-imagepullsecret
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
