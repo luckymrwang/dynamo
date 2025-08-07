@@ -64,7 +64,6 @@ spec:
             service: inference-extension
           initialDelaySeconds: 5
           periodSeconds: 10
-      - # --- FrontEnd sidecar container ---
       - name: frontend-router
         image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:fresh
         imagePullPolicy: IfNotPresent
