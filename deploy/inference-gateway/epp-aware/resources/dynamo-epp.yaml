@@ -36,18 +36,12 @@ spec:
         image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.0.1
         imagePullPolicy: IfNotPresent
         args:
-        - "--poolName"
-        - "dynamo-qwen"
-        - "--poolNamespace"
-        - "default"
-        - -v
-        - "4"
-        - --zap-encoder
-        - "json"
-        - -grpcPort
-        - "9002"
-        - -grpcHealthPort
-        - "9003"
+          - "-pool-name=dynamo-qwen"
+          - "-pool-namespace=default"
+          - "-v=4"
+          - "-zap-encoder=json"
+          - "-grpc-port=9002"
+          - "-grpc-health-port=9003"
         ports:
         - containerPort: 9002
         - containerPort: 9003
