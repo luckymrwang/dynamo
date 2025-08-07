@@ -59,12 +59,12 @@ The Inference Gateway is configured through the `inference-gateway-resources.yam
 Deploy the Inference Gateway resources to your Kubernetes cluster:
 
 ```bash
-cd deploy/inference-gateway/example
+cd deploy/inference-gateway/epp-aware
 kubectl apply -f resources
 ```
 
 Key configurations include:
-- An InferenceModel resource for the DeepSeek model
+- An InferenceModel resource for the Qwen model
 - A service for the inference gateway
 - Required RBAC roles and bindings
 - RBAC permissions
@@ -84,7 +84,7 @@ Sample output:
 ```bash
 # kubectl get inferencepool
 NAME              AGE
-dynamo-qwen.      6s
+dynamo-qwen       6s
 
 # kubectl get inferencemodel
 NAME              MODEL NAME                                 INFERENCE POOL    CRITICALITY   AGE
@@ -122,10 +122,11 @@ curl $GATEWAY_URL/v1/models | jq .
 Send inference request to gateway:
 
 ```bash
+MODEL_NAME="Qwen/Qwen3-0.6B"
 curl $GATEWAY_URL/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "'"${MODEL_NAME}"'",
     "messages": [
     {
         "role": "user",
