@@ -33,7 +33,7 @@ spec:
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
-        image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0
+        image: dynamo-custom-epp:v0.0.1
         imagePullPolicy: IfNotPresent
         args:
         - -poolName
@@ -66,9 +66,36 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
       - # --- FrontEnd sidecar container ---
-      - name: frontend
-        image: dynamo-image:latest
+      - name: frontend-router
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:latest
         imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c"]
+        args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
         ports:
           - containerPort: 8000
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 60
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+              - /bin/sh
+              - -c
+              - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+
 
