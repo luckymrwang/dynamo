@@ -419,17 +419,6 @@ impl Client {
     /// Uses etcd's native prefix-based querying for efficient bulk retrieval.
     /// Common use cases: listing component instances, bucket entries, hierarchical data.
     ///
-    /// # Examples:
-    /// ```rust,no_run
-    /// # use dynamo_runtime::transports::etcd::Client;
-    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-    /// # let client: Client = todo!(); // Replace with actual client creation
-    /// let instances = client.kv_get_prefix("instances/dynamo/backend/").await?;
-    /// let entries = client.kv_get_prefix("storage/testbucket/").await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
     /// # Returns:
     /// - `Result<Vec<KeyValue>>`: All matching key-value pairs
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
