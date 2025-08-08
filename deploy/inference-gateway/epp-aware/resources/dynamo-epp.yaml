@@ -33,15 +33,18 @@ spec:
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
-        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.0.1
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-1
+        env:
+          - name: USE_STREAMING
+            value: "false"
         imagePullPolicy: IfNotPresent
         args:
-          - "-pool-name=dynamo-qwen"
-          - "-pool-namespace=default"
+          - "-poolName=qwen-pool"
+          - "-poolNamespace=default"
           - "-v=4"
           - "-zap-encoder=json"
-          - "-grpc-port=9002"
-          - "-grpc-health-port=9003"
+          - "-grpcPort=9002"
+          - "-grpcHealthPort=9003"
         ports:
         - containerPort: 9002
         - containerPort: 9003
