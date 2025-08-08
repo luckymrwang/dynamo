@@ -20,8 +20,9 @@ spec:
   selector:
     app: qwen-epp
   ports:
-    - protocol: TCP
+    - name: extproc
+      protocol: TCP
       port: 9002
       targetPort: 9002
-      appProtocol: http2
+      appProtocol: grpc
   type: ClusterIP
