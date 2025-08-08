@@ -358,6 +358,30 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn reset_after_preemption(&mut self) {
+        // Clean up any pending staging operations first
+        if self.staging_from_host.is_some() {
+            tracing::warn!(
+                request_id = self.request_id,
+                "======>>>>>>>>> Dropping staging_from_host during preemption reset"
+            );
+            self.staging_from_host = None;  // Force clear
+        }
+
+        if self.staging_from_disk.is_some() {
+            tracing::warn!(
+                request_id = self.request_id,
+                "======>>>>>>>>> Dropping staging_from_disk during preemption reset"
+            );
+            self.staging_from_disk = None;  // Force clear
+        }
+
+        if self.pending_operations.is_some() {
+            tracing::warn!(
+                request_id = self.request_id,
+                "======>>>>>>>>> Dropping pending_operations during preemption reset"
+            );
+            self.pending_operations = None;  // Force clear
+        }
         assert!(self.staging_from_disk.is_none());
         assert!(self.staging_from_host.is_none());
         assert!(self.pending_operations.is_none());
@@ -373,6 +397,7 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn reset(&mut self) {
+
         self.reset_after_preemption();
         self.state = SlotState::Initialized;
     }
