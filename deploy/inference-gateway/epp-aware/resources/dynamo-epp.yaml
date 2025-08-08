@@ -36,12 +36,12 @@ spec:
         image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-1
         env:
           - name: USE_STREAMING
-            value: "false"
+            value: "true"
         imagePullPolicy: IfNotPresent
         args:
           - "-poolName=qwen-pool"
           - "-poolNamespace=default"
-          - "-v=4"
+          - "-v=5"
           - "-zap-encoder=json"
           - "-grpcPort=9002"
           - "-grpcHealthPort=9003"
