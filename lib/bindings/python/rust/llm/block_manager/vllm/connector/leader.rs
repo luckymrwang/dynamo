@@ -127,20 +127,24 @@ impl Leader for KvConnectorLeader {
         request_num_tokens: usize,
         num_computed_tokens: usize,
     ) -> anyhow::Result<(usize, bool)> {
+
+        let slot_state = self.slot_manager.get_slot(&request_id).unwrap().lock().unwrap().state();
         tracing::debug!(
-            "request_num_tokens: {request_num_tokens}; num_computed_tokens: {num_computed_tokens}"
+            "request_num_tokens: {request_num_tokens}; num_computed_tokens: {num_computed_tokens}, request_id: {request_id}, request_state: {:?}",
+            slot_state
         );
 
         // the number of device matched tokens should be less than or equal to the number of tokens in the request
         debug_assert!(num_computed_tokens % self.block_size == 0);
 
         let shared_slot = self.slot_manager.get_slot(&request_id)?;
+
         let mut slot = shared_slot
             .lock()
             .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-        if slot.state() == SlotState::Prefilling {
-            tracing::warn!("slot is in the Prefilled state; this seems like we need to reset the slot and start over");
+        if slot.state() == SlotState::Prefilling || slot.state() == SlotState::NotScheduled {
+            tracing::warn!("slot is in the Prefilled/NotScheduled state; this seems like we need to reset the slot and start over");
             slot.reset();
         }
 
@@ -361,6 +365,30 @@ impl Leader for KvConnectorLeader {
                 );
                 md.add_operations(pending_ops);
             }
+        }
+
+        // At the end of build_connector_metadata(), this should be added:
+        if !inflight_requests.is_empty() {
+            // These are requests from previous passes that are no longer being processed
+            // They should be cleaned up from self.inflight_requests
+            let abandoned_request_ids: Vec<String> = inflight_requests.iter().cloned().collect();
+
+            for abandoned_request_id in &abandoned_request_ids {
+                tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Removing abandoned request from inflight_requests: {}", abandoned_request_id);
+
+                // Check if the slot still exists - finished requests have their slots removed
+                if self.slot_manager.has_slot(&abandoned_request_id) {
+                    let shared_slot = self.slot_manager.get_slot(&abandoned_request_id)?;
+                    let mut slot = shared_slot
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
+                    slot.mark_as_not_scheduled(iteration)?;
+                } else {
+                    tracing::warn!("=>>>>>>>>>>>>>>>>>>>>>>>>>>>>> Slot already removed for abandoned request: {}", abandoned_request_id);
+                }
+                //inflight_requests.remove(abandoned_request_id);
+            }
+
         }
 
         tracing::debug!("metadata: {md:#?}");
