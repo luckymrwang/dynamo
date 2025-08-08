@@ -93,10 +93,11 @@ spec:
           timeoutSeconds: 5
           failureThreshold: 3
         readinessProbe:
-          exec:
-            command:
-              - /bin/sh
-              - -c
-              - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 3
 
 
