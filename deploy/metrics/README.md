@@ -24,7 +24,7 @@ graph TD
         PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
         PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP
         PROMETHEUS -->|:8000/metrics| DYNAMOFE[Dynamo HTTP FE :8000]
-        PROMETHEUS -->|:9090/metrics| DYNAMOBACKEND[Dynamo backend :9090]
+        PROMETHEUS -->|:8001/metrics| DYNAMOBACKEND[Dynamo backend :8001]
         DYNAMOFE --> DYNAMOBACKEND
         GRAFANA -->|:9090/query API| PROMETHEUS
     end

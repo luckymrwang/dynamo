@@ -41,11 +41,11 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8000']  # on the "monitoring" network
 
-  # Launch via: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=9090 dynamo.<backend> ...
+  # Launch via: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8001 dynamo.<backend> ...
   - job_name: 'dynamo-backend'
     scrape_interval: 6s
     static_configs:
-      - targets: ['host.docker.internal:9090']
+      - targets: ['host.docker.internal:8001']
 
   # DEPRECATED: This metrics aggregation service is being deprecated in favor of MetricsRegistry
   # The new system uses the 'dynamo-backend' job above instead of this separate service
