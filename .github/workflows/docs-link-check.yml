@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
-          FILES=$(git ls-files | grep -E '\\.(md|mdx|rst|html)$' || true)
+          FILES=$(git ls-files | grep -E '\.(md|rst)$'' || true)
           if [ -z "$FILES" ]; then
             echo "No documentation files found to check."
             exit 0
