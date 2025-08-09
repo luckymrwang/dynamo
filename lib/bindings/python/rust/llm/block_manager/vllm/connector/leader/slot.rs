@@ -590,13 +590,13 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        if !matches!(self.state(), SlotState::Initialized | SlotState::Preempted | SlotState::NotScheduled) {
-            return Err(SlotError::InvalidOperation(format!(
-                "slot must be in the NotScheduled state to acquire local matches; got {:?}; request_id: {:?}",
-                self.state(),
-                self.request_id
-            )));
-        }
+        //if !matches!(self.state(), SlotState::Initialized | SlotState::Preempted | SlotState::NotScheduled) {
+        //    return Err(SlotError::InvalidOperation(format!(
+        //        "slot must be in the NotScheduled state to acquire local matches; got {:?}; request_id: {:?}",
+        //        self.state(),
+        //        self.request_id
+        //    )));
+        //}
 
         if matches!(self.state(), SlotState::Preempted) {
             tracing::info!("slot is in the Preempted state; we get another chance to match");
