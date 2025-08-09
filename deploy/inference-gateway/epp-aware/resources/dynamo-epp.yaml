@@ -33,7 +33,7 @@ spec:
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
-        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-1
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-4
         env:
           - name: USE_STREAMING
             value: "true"
