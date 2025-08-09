@@ -1,10 +1,6 @@
 # Installing Inference Gateway with Dynamo (Experimental)
 
-This is an experimental setup that uses a custom Dynamo EPP as a router and routes traffic  according to its decision.
-
-TODO
-
-This guide provides instructions for setting up the Inference Gateway with Dynamo for managing and routing inference requests.
+This guide provides instructions for setting up the Inference Gateway with Dynamo EPP for managing and routing inference requests.
 
 ## Prerequisites
 
@@ -13,48 +9,21 @@ This guide provides instructions for setting up the Inference Gateway with Dynam
 
 ## Installation Steps
 
-1. **Install Dynamo Cloud**
 
-[See Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
+1. **Deploy Inference Gateway**
+Follow the [Inference Gateway README](../README.md) .
+Finish the steps right before [Install dynamo model and dynamo gaie helm chart](../README.md#install-dynamo-model-and-dynamo-gaie-helm-chart)
 
-
-2. **Deploy Inference Gateway**
-
-First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
-
-Install the Inference Extension CRDs:
-```bash
-VERSION=v0.3.0
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$VERSION/manifests.yaml
-```
-
-Deploy an Inference Gateway. In this example, we'll install `Kgateway`:
-```bash
-KGTW_VERSION=v2.0.2
-
-# Install the Kgateway CRDs
-helm upgrade -i --create-namespace --namespace kgateway-system --version $KGTW_VERSION kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
-
-# Install Kgateway
-helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --set inferenceExtension.enabled=true
-
-# Deploy the Gateway
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
-kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml
-```
-
-### Validate Resources
-```bash
-kubectl get gateway inference-gateway
-
-# Sample output
-# NAME                CLASS      ADDRESS   PROGRAMMED   AGE
-# inference-gateway   kgateway             True         1m
-```
 
 3. **Apply Dynamo-specific manifests**
 
-The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
+The Inference Gateway is configured.
+Deploy DynamoGraph. We provide the example in the deployment.yaml which you can adapt.
+
+```bash
+cd deploy/inference-gateway/epp-aware
+kubectl apply -f deployment.yaml
+```
 
 Deploy the Inference Gateway resources to your Kubernetes cluster:
 
