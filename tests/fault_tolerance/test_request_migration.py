@@ -64,6 +64,8 @@ class DynamoWorkerProcess(ManagedProcess):
 
         # Set debug logging environment
         env = os.environ.copy()
+        # Ensure Hugging Face token is not propagated to subprocesses
+        env.pop("HF_TOKEN", None)
         env["DYN_LOG"] = "debug"
         env["DYN_SYSTEM_ENABLED"] = "true"
         env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
