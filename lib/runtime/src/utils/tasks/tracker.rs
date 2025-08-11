@@ -59,7 +59,8 @@ use crate::metrics::MetricsRegistry;
 use anyhow::Result;
 use async_trait::async_trait;
 use derive_builder::Builder;
-use std::sync::{Mutex, Weak};
+use std::collections::HashSet;
+use std::sync::{Mutex, RwLock, Weak};
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -556,28 +557,30 @@ impl HierarchicalTaskMetrics for DefaultRootTaskMetrics {
 ///
 /// This implementation maintains local counters and automatically forwards
 /// all metric updates to the parent tracker for hierarchical aggregation.
+/// Holds a strong reference to parent metrics for optimal performance.
 pub struct ChildTaskMetrics {
     /// Local metrics for this tracker
     local_metrics: TaskMetrics,
-    /// Weak reference to parent metrics to avoid circular references
-    parent_metrics: Weak<dyn HierarchicalTaskMetrics>,
+    /// Strong reference to parent metrics for fast chaining
+    /// Safe to hold since metrics don't own trackers - no circular references
+    parent_metrics: Arc<dyn HierarchicalTaskMetrics>,
 }
 
 impl ChildTaskMetrics {
     /// Create new child metrics with parent chaining
     ///
     /// # Arguments
-    /// * `parent_metrics` - Weak reference to parent metrics for chaining
+    /// * `parent_metrics` - Strong reference to parent metrics for chaining
     ///
     /// # Example
     /// ```rust
-    /// # use std::sync::{Arc, Weak};
+    /// # use std::sync::Arc;
     /// # use dynamo_runtime::utils::tasks::tracker::{ChildTaskMetrics, HierarchicalTaskMetrics};
     /// # fn example(parent: Arc<dyn HierarchicalTaskMetrics>) {
-    /// let child_metrics = ChildTaskMetrics::new(Arc::downgrade(&parent));
+    /// let child_metrics = ChildTaskMetrics::new(parent);
     /// # }
     /// ```
-    pub fn new(parent_metrics: Weak<dyn HierarchicalTaskMetrics>) -> Self {
+    pub fn new(parent_metrics: Arc<dyn HierarchicalTaskMetrics>) -> Self {
         Self {
             local_metrics: TaskMetrics::new(),
             parent_metrics,
@@ -588,44 +591,32 @@ impl ChildTaskMetrics {
 impl HierarchicalTaskMetrics for ChildTaskMetrics {
     fn increment_success(&self) {
         self.local_metrics.increment_success();
-        if let Some(parent) = self.parent_metrics.upgrade() {
-            parent.increment_success();
-        }
+        self.parent_metrics.increment_success();
     }
 
     fn increment_cancelled(&self) {
         self.local_metrics.increment_cancelled();
-        if let Some(parent) = self.parent_metrics.upgrade() {
-            parent.increment_cancelled();
-        }
+        self.parent_metrics.increment_cancelled();
     }
 
     fn increment_failed(&self) {
         self.local_metrics.increment_failed();
-        if let Some(parent) = self.parent_metrics.upgrade() {
-            parent.increment_failed();
-        }
+        self.parent_metrics.increment_failed();
     }
 
     fn increment_rejected(&self) {
         self.local_metrics.increment_rejected();
-        if let Some(parent) = self.parent_metrics.upgrade() {
-            parent.increment_rejected();
-        }
+        self.parent_metrics.increment_rejected();
     }
 
     fn increment_active(&self) {
         self.local_metrics.increment_active();
-        if let Some(parent) = self.parent_metrics.upgrade() {
-            parent.increment_active();
-        }
+        self.parent_metrics.increment_active();
     }
 
     fn decrement_active(&self) {
         self.local_metrics.decrement_active();
-        if let Some(parent) = self.parent_metrics.upgrade() {
-            parent.decrement_active();
-        }
+        self.parent_metrics.decrement_active();
     }
 
     fn success(&self) -> u64 {
@@ -720,8 +711,8 @@ pub struct TaskTracker {
     #[builder(default = "CancellationToken::new()")]
     cancel_token: CancellationToken,
     /// List of child trackers for hierarchical operations
-    #[builder(default = "Arc::new(Mutex::new(Vec::new()))")]
-    children: Arc<Mutex<Vec<Weak<TaskTracker>>>>,
+    #[builder(default = "Arc::new(RwLock::new(Vec::new()))")]
+    children: Arc<RwLock<Vec<Weak<TaskTracker>>>>,
 }
 
 impl TaskTracker {
@@ -835,7 +826,7 @@ impl TaskTracker {
     /// ```
     pub fn child_tracker(&self) -> Arc<TaskTracker> {
         let child_cancel_token = self.cancel_token.child_token();
-        let child_metrics = Arc::new(ChildTaskMetrics::new(Arc::downgrade(&self.metrics)));
+        let child_metrics = Arc::new(ChildTaskMetrics::new(self.metrics.clone()));
 
         let child = Arc::new(TaskTracker {
             inner: TokioTaskTracker::new(),
@@ -844,11 +835,14 @@ impl TaskTracker {
             error_policy: self.error_policy.create_child(),
             metrics: child_metrics,
             cancel_token: child_cancel_token,
-            children: Arc::new(Mutex::new(Vec::new())),
+            children: Arc::new(RwLock::new(Vec::new())),
         });
 
         // Register this child with the parent for hierarchical operations
-        self.children.lock().unwrap().push(Arc::downgrade(&child));
+        self.children.write().unwrap().push(Arc::downgrade(&child));
+
+        // Periodically clean up dead children to prevent unbounded growth
+        self.cleanup_dead_children();
 
         child
     }
@@ -872,7 +866,7 @@ impl TaskTracker {
         error_policy: Arc<dyn OnErrorPolicy>,
     ) -> Arc<TaskTracker> {
         let child_cancel_token = self.cancel_token.child_token();
-        let child_metrics = Arc::new(ChildTaskMetrics::new(Arc::downgrade(&self.metrics)));
+        let child_metrics = Arc::new(ChildTaskMetrics::new(self.metrics.clone()));
 
         let child = Arc::new(TaskTracker {
             inner: TokioTaskTracker::new(),
@@ -881,11 +875,14 @@ impl TaskTracker {
             error_policy,
             metrics: child_metrics,
             cancel_token: child_cancel_token,
-            children: Arc::new(Mutex::new(Vec::new())),
+            children: Arc::new(RwLock::new(Vec::new())),
         });
 
         // Register this child with the parent
-        self.children.lock().unwrap().push(Arc::downgrade(&child));
+        self.children.write().unwrap().push(Arc::downgrade(&child));
+
+        // Periodically clean up dead children to prevent unbounded growth
+        self.cleanup_dead_children();
 
         child
     }
@@ -1085,9 +1082,20 @@ impl TaskTracker {
     /// - Each tracker prevents new tasks and waits for existing tasks to complete
     /// - This is the graceful shutdown method for the entire tracker hierarchy
     pub async fn close(&self) {
-        // First, close all children hierarchically (depth-first)
+        // Fast path for leaf trackers (no children)
+        let is_leaf = {
+            let children_guard = self.children.read().unwrap();
+            children_guard.is_empty()
+        };
+
+        if is_leaf {
+            self.inner.close();
+            return;
+        }
+
+        // Hierarchical path for trackers with children
         let children: Vec<Arc<TaskTracker>> = {
-            let children_guard = self.children.lock().unwrap();
+            let children_guard = self.children.read().unwrap();
             children_guard
                 .iter()
                 .filter_map(|weak| weak.upgrade())
@@ -1118,9 +1126,21 @@ impl TaskTracker {
     /// - Each tracker is closed before waiting (Tokio requirement)
     /// - Leaf trackers simply close and wait for their own tasks
     pub async fn wait(&self) {
-        // First, wait for all children hierarchically (depth-first)
+        // Fast path for leaf trackers (no children)
+        let is_leaf = {
+            let children_guard = self.children.read().unwrap();
+            children_guard.is_empty()
+        };
+
+        if is_leaf {
+            self.inner.close();
+            self.inner.wait().await;
+            return;
+        }
+
+        // Hierarchical path for trackers with children
         let children: Vec<Arc<TaskTracker>> = {
-            let children_guard = self.children.lock().unwrap();
+            let children_guard = self.children.read().unwrap();
             children_guard
                 .iter()
                 .filter_map(|weak| weak.upgrade())
@@ -1178,16 +1198,81 @@ impl TaskTracker {
     /// # }
     /// ```
     pub fn child_count(&self) -> usize {
-        let children_guard = self.children.lock().unwrap();
+        let children_guard = self.children.read().unwrap();
         children_guard
             .iter()
             .filter(|weak| weak.upgrade().is_some())
             .count()
     }
 
+    /// Clean up dead weak references if needed
+    ///
+    /// This is called periodically to prevent unbounded growth of dead references.
+    /// Only cleans up if there are significantly more total references than alive ones.
+    fn cleanup_dead_children(&self) {
+        // Try to get read lock first to check if cleanup is needed
+        if let Ok(children_guard) = self.children.read() {
+            let total_count = children_guard.len();
+            let alive_count = children_guard
+                .iter()
+                .filter(|weak| weak.upgrade().is_some())
+                .count();
+
+            // Only clean up if we have significant dead references
+            // Use a threshold to avoid frequent cleanup operations
+            let should_cleanup = total_count > 10 && total_count > alive_count * 2;
+            drop(children_guard); // Release read lock
+
+            if should_cleanup {
+                // Upgrade to write lock and perform cleanup
+                if let Ok(mut children_guard) = self.children.write() {
+                    children_guard.retain(|weak| weak.upgrade().is_some());
+                }
+            }
+        }
+    }
+
     /// Generate a unique task ID
     fn generate_task_id(&self) -> TaskId {
         TaskId::new()
+    }
+
+    /// Collect all trackers in the hierarchy using iterative depth-first traversal
+    ///
+    /// Returns trackers in bottom-up order (children before parents) for safe shutdown.
+    /// This avoids recursive async calls and associated heap allocations.
+    fn collect_hierarchy(&self) -> Vec<Arc<TaskTracker>> {
+        let mut result = Vec::new();
+        let mut stack = vec![Arc::new(TaskTracker::clone(self))];
+        let mut visited = HashSet::new();
+
+        // Collect all trackers using depth-first search
+        while let Some(tracker) = stack.pop() {
+            let tracker_ptr = Arc::as_ptr(&tracker) as usize;
+            if visited.contains(&tracker_ptr) {
+                continue;
+            }
+            visited.insert(tracker_ptr);
+
+            // Add current tracker to result
+            result.push(tracker.clone());
+
+            // Add children to stack for processing
+            if let Ok(children_guard) = tracker.children.read() {
+                for weak_child in children_guard.iter() {
+                    if let Some(child) = weak_child.upgrade() {
+                        let child_ptr = Arc::as_ptr(&child) as usize;
+                        if !visited.contains(&child_ptr) {
+                            stack.push(child);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Reverse to get bottom-up order (children before parents)
+        result.reverse();
+        result
     }
 
     /// Execute a task with scheduling and error handling policies
@@ -1293,7 +1378,7 @@ impl Clone for TaskTracker {
             error_policy: self.error_policy.clone(),
             metrics: Arc::new(DefaultRootTaskMetrics::new()), // New default metrics for clone
             cancel_token: self.cancel_token.clone(),          // Same token for clone
-            children: Arc::new(Mutex::new(Vec::new())),       // New empty children list for clone
+            children: Arc::new(RwLock::new(Vec::new())),      // New empty children list for clone
         }
     }
 }
