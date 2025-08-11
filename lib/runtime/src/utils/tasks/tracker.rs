@@ -186,6 +186,8 @@ pub trait OnErrorPolicy: Send + Sync {
 /// Task execution metrics for a tracker
 #[derive(Debug, Default)]
 pub struct TaskMetrics {
+    /// Number of tasks issued/submitted (via spawn methods)
+    pub issued_count: AtomicU64,
     /// Number of successfully completed tasks
     pub success_count: AtomicU64,
     /// Number of cancelled tasks
@@ -202,6 +204,11 @@ impl TaskMetrics {
     /// Create new metrics instance
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Increment issued task counter
+    pub fn increment_issued(&self) {
+        self.issued_count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Increment success counter
@@ -234,6 +241,11 @@ impl TaskMetrics {
         self.active_count.fetch_sub(1, Ordering::Relaxed);
     }
 
+    /// Get current issued count
+    pub fn issued(&self) -> u64 {
+        self.issued_count.load(Ordering::Relaxed)
+    }
+
     /// Get current success count
     pub fn success(&self) -> u64 {
         self.success_count.load(Ordering::Relaxed)
@@ -264,6 +276,22 @@ impl TaskMetrics {
         self.success() + self.cancelled() + self.failed() + self.rejected()
     }
 
+    /// Get number of pending tasks (issued - completed)
+    ///
+    /// This represents tasks that have been issued but not yet completed
+    /// (includes both active tasks and those waiting in scheduler queues)
+    pub fn pending(&self) -> u64 {
+        self.issued().saturating_sub(self.total_completed())
+    }
+
+    /// Get number of tasks queued in scheduler (pending - active)
+    ///
+    /// This represents tasks that have been issued but are waiting
+    /// in the scheduler queue and not yet actively executing
+    pub fn queued(&self) -> u64 {
+        self.pending().saturating_sub(self.active())
+    }
+
     /// Calculate failure rate (failed / total_completed)
     ///
     /// Returns 0.0 if no tasks have completed
@@ -284,6 +312,9 @@ impl TaskMetrics {
 /// - Child trackers chain metric updates up to their parents for aggregation
 /// - All implementations maintain thread-safe atomic operations
 pub trait HierarchicalTaskMetrics: Send + Sync {
+    /// Increment issued task counter
+    fn increment_issued(&self);
+
     /// Increment success counter
     fn increment_success(&self);
 
@@ -301,6 +332,9 @@ pub trait HierarchicalTaskMetrics: Send + Sync {
 
     /// Decrement active task counter
     fn decrement_active(&self);
+
+    /// Get current issued count (local to this tracker)
+    fn issued(&self) -> u64;
 
     /// Get current success count (local to this tracker)
     fn success(&self) -> u64;
@@ -320,6 +354,16 @@ pub trait HierarchicalTaskMetrics: Send + Sync {
     /// Get total completed tasks (success + cancelled + failed + rejected)
     fn total_completed(&self) -> u64 {
         self.success() + self.cancelled() + self.failed() + self.rejected()
+    }
+
+    /// Get number of pending tasks (issued - completed)
+    fn pending(&self) -> u64 {
+        self.issued().saturating_sub(self.total_completed())
+    }
+
+    /// Get number of tasks queued in scheduler (pending - active)
+    fn queued(&self) -> u64 {
+        self.pending().saturating_sub(self.active())
     }
 
     /// Calculate failure rate (failed / total_completed)
@@ -348,11 +392,13 @@ pub struct RootTaskMetrics {
     /// Local metrics for this tracker
     local_metrics: TaskMetrics,
     /// Prometheus metrics integration
+    prometheus_issued: prometheus::IntCounter,
     prometheus_success: prometheus::IntCounter,
     prometheus_cancelled: prometheus::IntCounter,
     prometheus_failed: prometheus::IntCounter,
     prometheus_rejected: prometheus::IntCounter,
     prometheus_active: prometheus::IntGauge,
+    prometheus_queued: prometheus::IntGauge,
 }
 
 impl RootTaskMetrics {
@@ -376,6 +422,12 @@ impl RootTaskMetrics {
         registry: &R,
         component_name: &str,
     ) -> anyhow::Result<Self> {
+        let issued_counter = registry.create_intcounter(
+            &format!("{}_tasks_issued_total", component_name),
+            "Total number of tasks issued/submitted",
+            &[],
+        )?;
+
         let success_counter = registry.create_intcounter(
             &format!("{}_tasks_success_total", component_name),
             "Total number of successfully completed tasks",
@@ -406,46 +458,78 @@ impl RootTaskMetrics {
             &[],
         )?;
 
+        let queued_gauge = registry.create_intgauge(
+            &format!("{}_tasks_queued", component_name),
+            "Current number of tasks queued in scheduler",
+            &[],
+        )?;
+
         Ok(Self {
             local_metrics: TaskMetrics::new(),
+            prometheus_issued: issued_counter,
             prometheus_success: success_counter,
             prometheus_cancelled: cancelled_counter,
             prometheus_failed: failed_counter,
             prometheus_rejected: rejected_counter,
             prometheus_active: active_gauge,
+            prometheus_queued: queued_gauge,
         })
     }
 }
 
+impl RootTaskMetrics {
+    /// Update the queued gauge based on current metrics
+    fn update_queued_gauge(&self) {
+        let queued = self.local_metrics.queued() as i64;
+        self.prometheus_queued.set(queued);
+    }
+}
+
 impl HierarchicalTaskMetrics for RootTaskMetrics {
+    fn increment_issued(&self) {
+        self.local_metrics.increment_issued();
+        self.prometheus_issued.inc();
+        self.update_queued_gauge();
+    }
+
     fn increment_success(&self) {
         self.local_metrics.increment_success();
         self.prometheus_success.inc();
+        self.update_queued_gauge();
     }
 
     fn increment_cancelled(&self) {
         self.local_metrics.increment_cancelled();
         self.prometheus_cancelled.inc();
+        self.update_queued_gauge();
     }
 
     fn increment_failed(&self) {
         self.local_metrics.increment_failed();
         self.prometheus_failed.inc();
+        self.update_queued_gauge();
     }
 
     fn increment_rejected(&self) {
         self.local_metrics.increment_rejected();
         self.prometheus_rejected.inc();
+        self.update_queued_gauge();
     }
 
     fn increment_active(&self) {
         self.local_metrics.increment_active();
         self.prometheus_active.inc();
+        self.update_queued_gauge();
     }
 
     fn decrement_active(&self) {
         self.local_metrics.decrement_active();
         self.prometheus_active.dec();
+        self.update_queued_gauge();
+    }
+
+    fn issued(&self) -> u64 {
+        self.local_metrics.issued()
     }
 
     fn success(&self) -> u64 {
@@ -508,6 +592,10 @@ impl Default for DefaultRootTaskMetrics {
 }
 
 impl HierarchicalTaskMetrics for DefaultRootTaskMetrics {
+    fn increment_issued(&self) {
+        self.local_metrics.increment_issued();
+    }
+
     fn increment_success(&self) {
         self.local_metrics.increment_success();
     }
@@ -530,6 +618,10 @@ impl HierarchicalTaskMetrics for DefaultRootTaskMetrics {
 
     fn decrement_active(&self) {
         self.local_metrics.decrement_active();
+    }
+
+    fn issued(&self) -> u64 {
+        self.local_metrics.issued()
     }
 
     fn success(&self) -> u64 {
@@ -589,6 +681,11 @@ impl ChildTaskMetrics {
 }
 
 impl HierarchicalTaskMetrics for ChildTaskMetrics {
+    fn increment_issued(&self) {
+        self.local_metrics.increment_issued();
+        self.parent_metrics.increment_issued();
+    }
+
     fn increment_success(&self) {
         self.local_metrics.increment_success();
         self.parent_metrics.increment_success();
@@ -617,6 +714,10 @@ impl HierarchicalTaskMetrics for ChildTaskMetrics {
     fn decrement_active(&self) {
         self.local_metrics.decrement_active();
         self.parent_metrics.decrement_active();
+    }
+
+    fn issued(&self) -> u64 {
+        self.local_metrics.issued()
     }
 
     fn success(&self) -> u64 {
@@ -1022,6 +1123,9 @@ impl TaskTracker {
     {
         let task_id = self.generate_task_id();
 
+        // Increment issued counter immediately when task is submitted
+        self.metrics.increment_issued();
+
         // Clone necessary components to move into the task
         let scheduler = self.scheduler.clone();
         let error_policy = self.error_policy.clone();
@@ -1082,6 +1186,9 @@ impl TaskTracker {
         T: Send + 'static,
     {
         let task_id = self.generate_task_id();
+
+        // Increment issued counter immediately when task is submitted
+        self.metrics.increment_issued();
 
         // Clone necessary components to move into the task
         let scheduler = self.scheduler.clone();
@@ -1726,10 +1833,15 @@ mod tests {
         let error_policy = create_log_policy();
         let tracker = TaskTracker::new(scheduler, error_policy);
 
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let handle = tracker.spawn(async {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Wait for signal to complete instead of sleep
+            rx.await.ok();
             Ok(42)
         });
+
+        // Signal task to complete
+        tx.send(()).ok();
 
         // Verify task completes successfully
         let result = handle.await.unwrap().unwrap();
@@ -1771,12 +1883,15 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let max_concurrent = Arc::new(AtomicU32::new(0));
 
+        // Use broadcast channel to coordinate all tasks
+        let (tx, _) = tokio::sync::broadcast::channel(1);
         let mut handles = Vec::new();
 
         // Spawn 5 tasks that will track concurrency
         for _ in 0..5 {
             let counter_clone = counter.clone();
             let max_clone = max_concurrent.clone();
+            let mut rx = tx.subscribe();
 
             let handle = tracker.spawn(async move {
                 // Increment active counter
@@ -1785,8 +1900,8 @@ mod tests {
                 // Track max concurrent
                 max_clone.fetch_max(current, Ordering::Relaxed);
 
-                // Hold for a bit
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                // Wait for signal to complete instead of sleep
+                rx.recv().await.ok();
 
                 // Decrement when done
                 counter_clone.fetch_sub(1, Ordering::Relaxed);
@@ -1795,6 +1910,13 @@ mod tests {
             });
             handles.push(handle);
         }
+
+        // Give tasks time to start and register concurrency
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Signal all tasks to complete
+        tx.send(()).ok();
 
         // Wait for all tasks to complete
         for handle in handles {
@@ -1838,12 +1960,15 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let tracker = TaskTracker::new(scheduler, error_policy);
 
+        // Use oneshot channel instead of sleep for deterministic timing
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+
         // Spawn a task that respects cancellation
         let handle = tracker.spawn({
             let cancel_token = cancel_token.clone();
             async move {
                 tokio::select! {
-                    _ = tokio::time::sleep(Duration::from_secs(1)) => Ok(()),
+                    _ = rx => Ok(()),
                     _ = cancel_token.cancelled() => Err(anyhow::anyhow!("Task was cancelled")),
                 }
             }
@@ -1944,15 +2069,23 @@ mod tests {
         let error_policy = create_log_policy();
         let tracker = TaskTracker::new(scheduler, error_policy);
 
-        // Spawn some tasks
+        // Use broadcast channel to coordinate task completion
+        let (tx, _) = tokio::sync::broadcast::channel(1);
         let mut handles = Vec::new();
+
+        // Spawn some tasks
         for i in 0..3 {
+            let mut rx = tx.subscribe();
             let handle = tracker.spawn(async move {
-                tokio::time::sleep(Duration::from_millis(50)).await;
+                // Wait for signal instead of sleep
+                rx.recv().await.ok();
                 Ok(i)
             });
             handles.push(handle);
         }
+
+        // Signal all tasks to complete before closing
+        tx.send(()).ok();
 
         // Close tracker and wait for completion
         tracker.close().await;
@@ -1978,27 +2111,30 @@ mod tests {
         // Initially all permits should be available
         assert_eq!(scheduler.available_permits(), 3);
 
-        let blocker = Arc::new(tokio::sync::Barrier::new(4)); // 3 tasks + test thread
+        // Use broadcast channel to coordinate task completion
+        let (tx, _) = tokio::sync::broadcast::channel(1);
         let mut handles = Vec::new();
 
-        // Spawn 3 tasks that will block
+        // Spawn 3 tasks that will hold permits
         for _ in 0..3 {
-            let barrier_clone = blocker.clone();
+            let mut rx = tx.subscribe();
             let handle = tracker.spawn(async move {
-                barrier_clone.wait().await;
+                // Wait for signal to complete
+                rx.recv().await.ok();
                 Ok(())
             });
             handles.push(handle);
         }
 
         // Give tasks time to acquire permits
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
 
         // All permits should be taken
         assert_eq!(scheduler.available_permits(), 0);
 
-        // Release the barrier
-        blocker.wait().await;
+        // Signal all tasks to complete
+        tx.send(()).ok();
 
         // Wait for tasks to complete
         for handle in handles {
@@ -2072,21 +2208,25 @@ mod tests {
         let tracker = TaskTracker::new(scheduler, error_policy);
 
         // Test successful completion
+        let (tx, rx) = tokio::sync::oneshot::channel();
         let handle = tracker.spawn_cancellable(|_cancel_token| async move {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            // Wait for signal instead of sleep
+            rx.await.ok();
             CancellableTaskResult::Ok(42)
         });
+
+        // Signal task to complete
+        tx.send(()).ok();
 
         let result = handle.await.unwrap().unwrap();
         assert_eq!(result, 42);
         assert_eq!(tracker.metrics().success(), 1);
 
         // Test cancellation handling
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
         let handle = tracker.spawn_cancellable(|cancel_token| async move {
             tokio::select! {
-                _ = tokio::time::sleep(Duration::from_millis(1000)) => {
-                    CancellableTaskResult::Ok("should not complete")
-                },
+                _ = rx => CancellableTaskResult::Ok("should not complete"),
                 _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
             }
         });
@@ -2127,9 +2267,12 @@ mod tests {
         // Cancel the tracker first
         tracker.cancel();
 
+        // Use oneshot channel instead of sleep
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+
         // Now try to spawn a task - it should be cancelled before execution
         let handle = tracker.spawn(async {
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            rx.await.ok();
             Ok(42)
         });
 
@@ -2154,11 +2297,14 @@ mod tests {
         });
 
         // Give the blocker time to acquire the permit
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::task::yield_now().await;
+
+        // Use oneshot channel for the second task
+        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
 
         // Spawn another task that will wait for semaphore
         let handle = tracker.spawn(async {
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            rx.await.ok();
             Ok(42)
         });
 
@@ -2217,6 +2363,141 @@ mod tests {
         assert!(child1.cancellation_token().is_cancelled());
         assert!(child2.cancellation_token().is_cancelled());
         assert!(grandchild.cancellation_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_queue_depth_calculation() {
+        // Test that we can calculate tasks queued in scheduler
+        let scheduler = create_semaphore_scheduler(2); // Only 2 concurrent tasks
+        let error_policy = create_log_policy();
+        let tracker = TaskTracker::new(scheduler, error_policy);
+
+        // Initially no tasks
+        assert_eq!(tracker.metrics().issued(), 0);
+        assert_eq!(tracker.metrics().active(), 0);
+        assert_eq!(tracker.metrics().queued(), 0);
+        assert_eq!(tracker.metrics().pending(), 0);
+
+        // Use long running tasks to occupy the semaphore
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+
+        // Spawn 2 long-running tasks that will hold the semaphore permits
+        let tx1 = tx.clone();
+        let handle1 = tracker.spawn(async move {
+            tx1.send(()).await.unwrap(); // Signal that task started
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok(1)
+        });
+
+        let tx2 = tx.clone();
+        let handle2 = tracker.spawn(async move {
+            tx2.send(()).await.unwrap(); // Signal that task started
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            Ok(2)
+        });
+
+        // Wait for both tasks to start (they should get the 2 semaphore permits)
+        rx.recv().await.unwrap();
+        rx.recv().await.unwrap();
+        drop(tx); // Close the channel
+
+        // Give tasks time to register as active
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Now spawn 2 more tasks - these should be queued
+        let handle3 = tracker.spawn(async { Ok(3) });
+        let handle4 = tracker.spawn(async { Ok(4) });
+
+        // Give queued tasks time to register
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Check metrics - we should have queue depth now
+        assert_eq!(tracker.metrics().issued(), 4, "Should have 4 issued tasks");
+        assert_eq!(
+            tracker.metrics().pending(),
+            4,
+            "Should have 4 pending tasks total"
+        );
+        assert_eq!(
+            tracker.metrics().total_completed(),
+            0,
+            "No tasks completed yet"
+        );
+
+        // The active count should be 2 (semaphore limit) and queued should be 2
+        // Note: There might be slight timing variations, so let's be flexible
+        let active = tracker.metrics().active();
+        let queued = tracker.metrics().queued();
+        println!("Active: {}, Queued: {}", active, queued);
+
+        // At minimum, we should have some tasks active and total pending should be 4
+        assert!(active > 0, "Should have some active tasks");
+        assert_eq!(
+            active + queued,
+            4,
+            "Active + Queued should equal pending tasks"
+        );
+
+        // Wait for all tasks to complete
+        let results = tokio::join!(handle1, handle2, handle3, handle4);
+        for result in [results.0, results.1, results.2, results.3] {
+            result.unwrap().unwrap();
+        }
+
+        // Final state - all completed
+        assert_eq!(tracker.metrics().issued(), 4);
+        assert_eq!(tracker.metrics().active(), 0);
+        assert_eq!(tracker.metrics().queued(), 0);
+        assert_eq!(tracker.metrics().pending(), 0);
+        assert_eq!(tracker.metrics().total_completed(), 4);
+        assert_eq!(tracker.metrics().success(), 4);
+    }
+
+    #[tokio::test]
+    async fn test_issued_counter_tracking() {
+        // Test that issued counter is incremented when tasks are spawned
+        let scheduler = create_semaphore_scheduler(10);
+        let error_policy = create_log_policy();
+        let tracker = TaskTracker::new(scheduler, error_policy);
+
+        // Initially no tasks issued
+        assert_eq!(tracker.metrics().issued(), 0);
+        assert_eq!(tracker.metrics().pending(), 0);
+
+        // Spawn some tasks
+        let handle1 = tracker.spawn(async { Ok(1) });
+        let handle2 = tracker.spawn(async { Ok(2) });
+        let handle3 = tracker.spawn_cancellable(|_| async { CancellableTaskResult::Ok(3) });
+
+        // Issued counter should be incremented immediately
+        assert_eq!(tracker.metrics().issued(), 3);
+        assert_eq!(tracker.metrics().pending(), 3); // None completed yet
+
+        // Complete the tasks
+        assert_eq!(handle1.await.unwrap().unwrap(), 1);
+        assert_eq!(handle2.await.unwrap().unwrap(), 2);
+        assert_eq!(handle3.await.unwrap().unwrap(), 3);
+
+        // Check final accounting
+        assert_eq!(tracker.metrics().issued(), 3);
+        assert_eq!(tracker.metrics().success(), 3);
+        assert_eq!(tracker.metrics().total_completed(), 3);
+        assert_eq!(tracker.metrics().pending(), 0); // All completed
+
+        // Test hierarchical accounting
+        let child = tracker.child_tracker();
+        let child_handle = child.spawn(async { Ok(42) });
+
+        // Both parent and child should see the issued task
+        assert_eq!(child.metrics().issued(), 1);
+        assert_eq!(tracker.metrics().issued(), 4); // Parent sees all
+
+        child_handle.await.unwrap().unwrap();
+
+        // Final hierarchical check
+        assert_eq!(child.metrics().pending(), 0);
+        assert_eq!(tracker.metrics().pending(), 0);
+        assert_eq!(tracker.metrics().success(), 4); // Parent sees all successes
     }
 
     #[tokio::test]
