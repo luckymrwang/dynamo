@@ -24,7 +24,7 @@ VLLM_REF="v0.10.0"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="1876566"
+DEEPGEMM_REF="03d0be3"
 FLASHINF_REF="v0.2.8rc1"
 TORCH_BACKEND="cu128"
 
@@ -168,13 +168,6 @@ cd $INSTALLATION_DIR
 git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
 cd flashinfer
 git checkout $FLASHINF_REF
-uv pip install -v .
-
-if [ "$ARCH" = "amd64" ]; then
-    # NOTE: PyTorch 2.8.0 compatibility issue
-    # PyTorch 2.8.0 causes "RuntimeError: operator torchvision::nms does not exist" error.
-    # Temporarily pinning to PyTorch 2.7.1 until this compatibility issue is resolved.
-    uv pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
-fi
+uv pip install -v --no-build-isolation .
 
 echo "vllm installation completed successfully"
