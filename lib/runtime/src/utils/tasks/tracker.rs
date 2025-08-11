@@ -3,14 +3,27 @@
 
 //! # Task Tracker
 //!
-//! A hierarchical task tracking system that provides:
-//! - Composable scheduling policies via [`TaskScheduler`] trait
-//! - Flexible error handling via [`OnErrorPolicy`] trait
-//! - Parent-child relationships with independent metrics
-//! - Cancellation propagation and isolation
-//! - Hierarchical wait/close operations that traverse the dependency tree
+//! A hierarchical task tracking system with composable scheduling and error policies.
+//!
+//! ## Core Features
+//! - **Hierarchical Management**: Parent-child relationships with automatic lifecycle management
+//! - **Pluggable Scheduling**: Semaphore limits, unlimited throughput, or custom policies
+//! - **Error Handling**: Cancel-on-error, log-only, threshold-based, or custom policies
+//! - **Rich Metrics**: Task counts, success/failure rates, queue depth (with Prometheus support)
+//! - **Cancellation**: Token-based with hierarchical propagation and isolation
+//! - **Safe Child Creation**: Prevents child creation from closed parents
 //!
 //! Built on top of `tokio_util::task::TaskTracker` for robust task lifecycle management.
+//!
+//! ## Future Policies
+//!
+//! The system is designed for extensibility. See the source code for detailed TODO comments
+//! describing additional policies that can be implemented:
+//! - **Scheduling**: Token bucket rate limiting, adaptive concurrency, memory-aware scheduling
+//! - **Error Handling**: Retry with backoff, circuit breakers, dead letter queues
+//!
+//! Each TODO comment includes complete implementation guidance with data structures,
+//! algorithms, and dependencies needed for future contributors.
 //!
 //! ## Important: Close-Before-Wait Pattern
 //!
@@ -20,32 +33,149 @@
 //! - `close()` closes the entire tracker hierarchy
 //! - Both methods use depth-first traversal of the dependency tree
 //!
-//! ## Usage
+//! ## Quick Start
 //!
 //! ```rust
-//! use std::sync::Arc;
-//! use tokio::sync::Semaphore;
-//! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, CancelOnError};
-//! use tokio_util::sync::CancellationToken;
+//! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! // Create root tracker with semaphore scheduler and cancel-on-error policy
-//! let semaphore = Arc::new(Semaphore::new(10));
-//! let scheduler = Arc::new(SemaphoreScheduler::new(semaphore));
-//! let cancel_token = CancellationToken::new();
-//! let error_policy = Arc::new(CancelOnError::new(cancel_token.clone()));
+//! // Simple setup with convenience constructors - minimal boilerplate!
+//! let tracker = TaskTracker::builder()
+//!     .scheduler(SemaphoreScheduler::with_permits(10))  // Returns Arc automatically
+//!     .error_policy(LogOnlyPolicy::new_arc())         // Returns Arc automatically
+//!     .build()?;
 //!
-//! let root_tracker = TaskTracker::new(scheduler, error_policy);
+//! // Spawn tasks and get results
+//! let result = tracker.spawn(async { Ok(42) }).await??;
+//! assert_eq!(result, 42);
+//! # Ok(())
+//! # }
+//! ```
 //!
-//! // Create child trackers for different sources
-//! let source_a = root_tracker.child_tracker();
-//! let source_b = root_tracker.child_tracker();
+//! ## Hierarchical Organization
 //!
-//! // Spawn tasks
-//! let handle = source_a.spawn(async {
-//!     // Your async work here
-//!     Ok(42)
-//! });
+//! ```rust
+//! use dynamo_runtime::utils::tasks::tracker::{
+//!     TaskTracker, UnlimitedScheduler, ThresholdCancelPolicy, SemaphoreScheduler
+//! };
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! // Create root tracker with failure threshold policy
+//! let (error_policy, _token) = ThresholdCancelPolicy::new_arc(5);
+//! let root = TaskTracker::builder()
+//!     .scheduler(UnlimitedScheduler::new_arc())
+//!     .error_policy(error_policy)
+//!     .build()?;
+//!
+//! // Create child trackers for different components
+//! let api_handler = root.child_tracker()?;  // Inherits policies
+//! let background_jobs = root.child_tracker()?;
+//!
+//! // Children can have custom policies
+//! let rate_limited = root.child_tracker_builder()
+//!     .scheduler(SemaphoreScheduler::with_permits(2))  // Custom concurrency limit
+//!     .build()?;
+//!
+//! // Tasks run independently but metrics roll up
+//! api_handler.spawn(async { Ok(()) });
+//! background_jobs.spawn(async { Ok(()) });
+//! rate_limited.spawn(async { Ok(()) });
+//!
+//! // Wait for all children hierarchically
+//! root.wait().await;
+//! assert_eq!(root.metrics().success(), 3); // Sees all successes
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Policy Examples
+//!
+//! ```rust
+//! use dynamo_runtime::utils::tasks::tracker::{
+//!     TaskTracker, CancelOnError, SemaphoreScheduler, ThresholdCancelPolicy
+//! };
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! // Pattern-based error cancellation
+//! let (error_policy, _token) = CancelOnError::with_patterns_arc(
+//!     vec!["OutOfMemory".to_string(), "DeviceError".to_string()]
+//! );
+//! let simple = TaskTracker::builder()
+//!     .scheduler(SemaphoreScheduler::with_permits(5))
+//!     .error_policy(error_policy)
+//!     .build()?;
+//!
+//! // Threshold-based cancellation with monitoring
+//! let scheduler = SemaphoreScheduler::with_permits(10);  // Returns Arc<SemaphoreScheduler>
+//! let (error_policy, token) = ThresholdCancelPolicy::new_arc(3);  // Returns (Arc<Policy>, Token)
+//!
+//! let advanced = TaskTracker::builder()
+//!     .scheduler(scheduler)
+//!     .error_policy(error_policy)
+//!     .build()?;
+//!
+//! // Monitor cancellation externally
+//! if token.is_cancelled() {
+//!     println!("Tracker cancelled due to failures");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Metrics and Observability
+//!
+//! ```rust
+//! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+//!
+//! # async fn example() -> anyhow::Result<()> {
+//! let tracker = TaskTracker::builder()
+//!     .scheduler(SemaphoreScheduler::with_permits(2))  // Only 2 concurrent tasks
+//!     .error_policy(LogOnlyPolicy::new_arc())
+//!     .build()?;
+//!
+//! // Spawn multiple tasks
+//! for i in 0..5 {
+//!     tracker.spawn(async move {
+//!         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+//!         Ok(i)
+//!     });
+//! }
+//!
+//! // Check metrics
+//! let metrics = tracker.metrics();
+//! println!("Issued: {}", metrics.issued());        // 5 tasks issued
+//! println!("Active: {}", metrics.active());        // 2 tasks running (semaphore limit)
+//! println!("Queued: {}", metrics.queued());        // 3 tasks waiting in scheduler queue
+//! println!("Pending: {}", metrics.pending());      // 5 tasks not yet completed
+//!
+//! tracker.wait().await;
+//! assert_eq!(metrics.success(), 5);
+//! assert_eq!(metrics.pending(), 0);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Prometheus Integration
+//!
+//! ```rust
+//! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+//! use dynamo_runtime::metrics::MetricsRegistry;
+//!
+//! # async fn example(registry: &dyn MetricsRegistry) -> anyhow::Result<()> {
+//! // Root tracker with Prometheus metrics
+//! let tracker = TaskTracker::new_with_prometheus(
+//!     SemaphoreScheduler::with_permits(10),
+//!     LogOnlyPolicy::new_arc(),
+//!     registry,
+//!     "my_component"
+//! )?;
+//!
+//! // Metrics automatically exported to Prometheus:
+//! // - my_component_tasks_issued_total
+//! // - my_component_tasks_success_total
+//! // - my_component_tasks_failed_total
+//! // - my_component_tasks_active
+//! // - my_component_tasks_queued
 //! # Ok(())
 //! # }
 //! ```
@@ -305,7 +435,7 @@ pub enum SchedulingResult<T> {
 /// Implementors control when and how tasks are executed, including
 /// concurrency limits, resource management, and scheduling decisions.
 #[async_trait]
-pub trait TaskScheduler: Send + Sync {
+pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
     /// Schedule a task for execution
     ///
     /// This method wraps the provided future with scheduling logic
@@ -393,7 +523,7 @@ impl TaskScheduler for UnlimitedScheduler {
 /// Implementors define how to respond to task failures, including
 /// whether to propagate cancellation and how to handle error thresholds.
 #[async_trait]
-pub trait OnErrorPolicy: Send + Sync {
+pub trait OnErrorPolicy: Send + Sync + std::fmt::Debug {
     /// Create a child policy for a child tracker
     ///
     /// This allows policies to maintain hierarchical relationships,
@@ -561,7 +691,7 @@ impl TaskMetrics {
 /// - Root trackers integrate with Prometheus metrics for observability
 /// - Child trackers chain metric updates up to their parents for aggregation
 /// - All implementations maintain thread-safe atomic operations
-pub trait HierarchicalTaskMetrics: Send + Sync {
+pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
     /// Increment issued task counter
     fn increment_issued(&self);
 
@@ -638,6 +768,7 @@ pub trait HierarchicalTaskMetrics: Send + Sync {
 ///
 /// This implementation maintains local counters and exposes them as Prometheus metrics
 /// through the provided MetricsRegistry.
+#[derive(Debug)]
 pub struct RootTaskMetrics {
     /// Local metrics for this tracker
     local_metrics: TaskMetrics,
@@ -815,6 +946,7 @@ impl HierarchicalTaskMetrics for RootTaskMetrics {
 /// This implementation only maintains local counters and is suitable for
 /// applications that don't need Prometheus metrics or want to handle
 /// metrics exposition themselves.
+#[derive(Debug)]
 pub struct DefaultRootTaskMetrics {
     /// Local metrics for this tracker
     local_metrics: TaskMetrics,
@@ -900,6 +1032,7 @@ impl HierarchicalTaskMetrics for DefaultRootTaskMetrics {
 /// This implementation maintains local counters and automatically forwards
 /// all metric updates to the parent tracker for hierarchical aggregation.
 /// Holds a strong reference to parent metrics for optimal performance.
+#[derive(Debug)]
 pub struct ChildTaskMetrics {
     /// Local metrics for this tracker
     local_metrics: TaskMetrics,
@@ -1020,7 +1153,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     /// # fn example(parent: &TaskTracker) {
     /// let child = parent.child_tracker_builder()
     ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5)))))
-    ///     .build();
+    ///     .build().unwrap();
     /// # }
     /// ```
     pub fn scheduler(mut self, scheduler: Arc<dyn TaskScheduler>) -> Self {
@@ -1043,7 +1176,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     /// # fn example(parent: &TaskTracker) {
     /// let child = parent.child_tracker_builder()
     ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
-    ///     .build();
+    ///     .build().unwrap();
     /// # }
     /// ```
     pub fn error_policy(mut self, error_policy: Arc<dyn OnErrorPolicy>) -> Self {
@@ -1062,7 +1195,17 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     ///
     /// # Returns
     /// A new `Arc<TaskTracker>` configured as a child of the parent
-    pub fn build(self) -> Arc<TaskTracker> {
+    ///
+    /// # Errors
+    /// Returns an error if the parent tracker is already closed
+    pub fn build(self) -> anyhow::Result<Arc<TaskTracker>> {
+        // Validate that parent tracker is still active
+        if self.parent.is_closed() {
+            return Err(anyhow::anyhow!(
+                "Cannot create child tracker from closed parent tracker"
+            ));
+        }
+
         let child_cancel_token = self.parent.cancel_token.child_token();
         let child_metrics = Arc::new(ChildTaskMetrics::new(self.parent.metrics.clone()));
 
@@ -1096,7 +1239,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
         // Periodically clean up dead children to prevent unbounded growth
         self.parent.cleanup_dead_children();
 
-        child
+        Ok(child)
     }
 }
 
@@ -1148,7 +1291,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Builder)]
+#[derive(Debug, Builder)]
 #[builder(pattern = "owned")]
 pub struct TaskTracker {
     /// Tokio's task tracker for lifecycle management
@@ -1272,16 +1415,27 @@ impl TaskTracker {
     /// - Gets a child cancellation token from the parent
     /// - Is independent for cancellation (child cancellation doesn't affect parent)
     ///
+    /// # Errors
+    /// Returns an error if the parent tracker is already closed
+    ///
     /// # Example
     /// ```rust
     /// # use std::sync::Arc;
     /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
-    /// # fn example(root_tracker: TaskTracker) {
-    /// let child_tracker = root_tracker.child_tracker();
+    /// # fn example(root_tracker: TaskTracker) -> anyhow::Result<()> {
+    /// let child_tracker = root_tracker.child_tracker()?;
     /// // Child inherits parent's policies but has separate metrics and lifecycle
+    /// # Ok(())
     /// # }
     /// ```
-    pub fn child_tracker(&self) -> Arc<TaskTracker> {
+    pub fn child_tracker(&self) -> anyhow::Result<Arc<TaskTracker>> {
+        // Validate that parent tracker is still active
+        if self.is_closed() {
+            return Err(anyhow::anyhow!(
+                "Cannot create child tracker from closed parent tracker"
+            ));
+        }
+
         let child_cancel_token = self.cancel_token.child_token();
         let child_metrics = Arc::new(ChildTaskMetrics::new(self.metrics.clone()));
 
@@ -1301,7 +1455,7 @@ impl TaskTracker {
         // Periodically clean up dead children to prevent unbounded growth
         self.cleanup_dead_children();
 
-        child
+        Ok(child)
     }
 
     /// Create a child tracker builder for flexible customization
@@ -1318,18 +1472,18 @@ impl TaskTracker {
     /// // Custom scheduler, inherit error policy
     /// let child1 = root_tracker.child_tracker_builder()
     ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5)))))
-    ///     .build();
+    ///     .build().unwrap();
     ///
     /// // Custom error policy, inherit scheduler
     /// let child2 = root_tracker.child_tracker_builder()
     ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
-    ///     .build();
+    ///     .build().unwrap();
     ///
     /// // Both custom
     /// let child3 = root_tracker.child_tracker_builder()
     ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(3)))))
     ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
-    ///     .build();
+    ///     .build().unwrap();
     /// # }
     /// ```
     pub fn child_tracker_builder(&self) -> ChildTrackerBuilder<'_> {
@@ -1856,6 +2010,7 @@ impl Clone for TaskTracker {
 /// let semaphore = Arc::new(Semaphore::new(5));
 /// let scheduler = SemaphoreScheduler::new(semaphore);
 /// ```
+#[derive(Debug)]
 pub struct SemaphoreScheduler {
     semaphore: Arc<Semaphore>,
 }
@@ -1958,6 +2113,7 @@ impl TaskScheduler for SemaphoreScheduler {
 ///     vec!["OutOfMemory".to_string(), "DeviceError".to_string()]
 /// );
 /// ```
+#[derive(Debug)]
 pub struct CancelOnError {
     cancel_token: CancellationToken,
     error_patterns: Vec<String>,
@@ -2042,6 +2198,7 @@ impl OnErrorPolicy for CancelOnError {
 ///
 /// This policy does not trigger cancellation and is useful for
 /// non-critical tasks or when you want to handle errors externally.
+#[derive(Debug)]
 pub struct LogOnlyPolicy;
 
 impl LogOnlyPolicy {
@@ -2090,6 +2247,7 @@ impl OnErrorPolicy for LogOnlyPolicy {
 /// // Cancel after 5 failures
 /// let (policy, token) = ThresholdCancelPolicy::new_arc(5);
 /// ```
+#[derive(Debug)]
 pub struct ThresholdCancelPolicy {
     cancel_token: CancellationToken,
     max_failures: usize,
@@ -2182,6 +2340,7 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
 /// // Cancel if more than 50% of tasks fail within any 60-second window
 /// let (policy, token) = RateCancelPolicy::new_arc(0.5, 60);
 /// ```
+#[derive(Debug)]
 pub struct RateCancelPolicy {
     cancel_token: CancellationToken,
     max_failure_rate: f32,
@@ -2438,7 +2597,7 @@ mod tests {
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
 
-        let child = parent.child_tracker();
+        let child = parent.child_tracker().unwrap();
 
         // Both should be operational initially
         assert!(!parent.is_closed());
@@ -2462,7 +2621,7 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child = parent.child_tracker();
+        let child = parent.child_tracker().unwrap();
 
         // Run tasks in parent
         let handle1 = parent.spawn(async { Ok(1) });
@@ -2485,7 +2644,7 @@ mod tests {
         let (error_policy, parent_token) = create_cancel_policy();
         let scheduler = create_semaphore_scheduler(10);
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child = parent.child_tracker();
+        let child = parent.child_tracker().unwrap();
 
         // Get child's cancel token
         let child_token = child
@@ -2622,8 +2781,8 @@ mod tests {
         let error_policy = create_log_policy();
 
         let root = TaskTracker::new(scheduler, error_policy);
-        let child = root.child_tracker();
-        let grandchild = child.child_tracker();
+        let child = root.child_tracker().unwrap();
+        let grandchild = child.child_tracker().unwrap();
 
         // All should have cancellation tokens
         let root_token = root.cancellation_token();
@@ -2771,7 +2930,7 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child = parent.child_tracker();
+        let child = parent.child_tracker().unwrap();
 
         // Cancel only the child
         child.cancel();
@@ -2796,9 +2955,9 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child1 = parent.child_tracker();
-        let child2 = parent.child_tracker();
-        let grandchild = child1.child_tracker();
+        let child1 = parent.child_tracker().unwrap();
+        let child2 = parent.child_tracker().unwrap();
+        let grandchild = child1.child_tracker().unwrap();
 
         // Cancel the parent
         parent.cancel();
@@ -2933,7 +3092,7 @@ mod tests {
         assert_eq!(tracker.metrics().pending(), 0); // All completed
 
         // Test hierarchical accounting
-        let child = tracker.child_tracker();
+        let child = tracker.child_tracker().unwrap();
         let child_handle = child.spawn(async { Ok(42) });
 
         // Both parent and child should see the issued task
@@ -2960,14 +3119,16 @@ mod tests {
         let child1 = parent
             .child_tracker_builder()
             .scheduler(child_scheduler.clone())
-            .build();
+            .build()
+            .unwrap();
 
         // Test custom error policy, inherit scheduler
         let (child_error_policy, _) = create_cancel_policy();
         let child2 = parent
             .child_tracker_builder()
             .error_policy(child_error_policy)
-            .build();
+            .build()
+            .unwrap();
 
         // Test both custom
         let another_scheduler = create_semaphore_scheduler(3);
@@ -2976,7 +3137,8 @@ mod tests {
             .child_tracker_builder()
             .scheduler(another_scheduler)
             .error_policy(another_error_policy)
-            .build();
+            .build()
+            .unwrap();
 
         // Test that all children are properly registered
         assert_eq!(parent.child_count(), 3);
@@ -3003,9 +3165,9 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child1 = parent.child_tracker();
-        let child2 = parent.child_tracker();
-        let grandchild = child1.child_tracker();
+        let child1 = parent.child_tracker().unwrap();
+        let child2 = parent.child_tracker().unwrap();
+        let grandchild = child1.child_tracker().unwrap();
 
         // Run successful tasks in different trackers
         let handle1 = parent.spawn(async { Ok(1) });
@@ -3067,7 +3229,7 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child = parent.child_tracker();
+        let child = parent.child_tracker().unwrap();
 
         // Run some successful and some failed tasks
         let success_handle = child.spawn(async { Ok(42) });
@@ -3139,9 +3301,9 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child1 = parent.child_tracker();
-        let child2 = parent.child_tracker();
-        let grandchild = child1.child_tracker();
+        let child1 = parent.child_tracker().unwrap();
+        let child2 = parent.child_tracker().unwrap();
+        let grandchild = child1.child_tracker().unwrap();
 
         // Verify parent tracks children
         assert_eq!(parent.child_count(), 2);
@@ -3215,7 +3377,7 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child = parent.child_tracker();
+        let child = parent.child_tracker().unwrap();
 
         // Spawn a quick parent task and slow child task
         let _parent_handle = parent.spawn(async {
@@ -3246,8 +3408,8 @@ mod tests {
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
-        let child = parent.child_tracker();
-        let grandchild = child.child_tracker();
+        let child = parent.child_tracker().unwrap();
+        let grandchild = child.child_tracker().unwrap();
 
         // Verify trackers start as open
         assert!(!parent.is_closed());
@@ -3316,5 +3478,74 @@ mod tests {
 
         // All constructors should work without explicit Arc::new calls
         // This test ensures the convenience API reduces boilerplate
+    }
+
+    #[tokio::test]
+    async fn test_child_creation_fails_after_close() {
+        // Test that child tracker creation fails from closed parent
+        let scheduler = create_semaphore_scheduler(10);
+        let error_policy = create_log_policy();
+        let parent = TaskTracker::new(scheduler, error_policy);
+
+        // Initially, creating a child should work
+        let _child = parent.child_tracker().unwrap();
+
+        // Close the parent tracker
+        parent.close().await;
+        assert!(parent.is_closed());
+
+        // Now, trying to create a child should fail
+        let result = parent.child_tracker();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("closed parent tracker"));
+    }
+
+    #[tokio::test]
+    async fn test_child_builder_fails_after_close() {
+        // Test that child tracker builder creation fails from closed parent
+        let scheduler = create_semaphore_scheduler(10);
+        let error_policy = create_log_policy();
+        let parent = TaskTracker::new(scheduler, error_policy);
+
+        // Initially, creating a child with builder should work
+        let _child = parent.child_tracker_builder().build().unwrap();
+
+        // Close the parent tracker
+        parent.close().await;
+        assert!(parent.is_closed());
+
+        // Now, trying to create a child with builder should fail
+        let result = parent.child_tracker_builder().build();
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("closed parent tracker"));
+    }
+
+    #[tokio::test]
+    async fn test_child_creation_succeeds_before_close() {
+        // Test that child creation works normally before parent is closed
+        let scheduler = create_semaphore_scheduler(10);
+        let error_policy = create_log_policy();
+        let parent = TaskTracker::new(scheduler, error_policy);
+
+        // Should be able to create multiple children before closing
+        let child1 = parent.child_tracker().unwrap();
+        let child2 = parent.child_tracker_builder().build().unwrap();
+
+        // Verify children can spawn tasks
+        let handle1 = child1.spawn(async { Ok(42) });
+        let handle2 = child2.spawn(async { Ok(24) });
+
+        let result1 = handle1.await.unwrap().unwrap();
+        let result2 = handle2.await.unwrap().unwrap();
+
+        assert_eq!(result1, 42);
+        assert_eq!(result2, 24);
+        assert_eq!(parent.metrics().success(), 2); // Parent sees all successes
     }
 }
