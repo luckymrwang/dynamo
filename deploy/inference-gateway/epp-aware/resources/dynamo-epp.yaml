@@ -68,6 +68,8 @@ spec:
         command: ["/bin/sh", "-c"]
         args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
         env:
+        - name: DYNAMO_NAMESPACE
+          value: "vllm-agg"
         - name: ETCD_ENDPOINTS
           value: "http://dynamo-platform-etcd:2379"
         - name: NATS_SERVER
