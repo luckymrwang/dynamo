@@ -68,6 +68,189 @@ use tokio_util::task::TaskTracker as TokioTaskTracker;
 use tracing::{debug, error, warn};
 use uuid::Uuid;
 
+/// Common scheduling policies for task execution
+///
+/// These enums provide convenient access to built-in scheduling policies
+/// without requiring manual construction of policy objects.
+#[derive(Debug, Clone)]
+pub enum SchedulingPolicy {
+    /// No concurrency limits - execute all tasks immediately
+    Unlimited,
+    /// Semaphore-based concurrency limiting
+    Semaphore(usize),
+    // TODO: Future scheduling policies to implement
+    //
+    // /// Token bucket rate limiting with burst capacity
+    // /// Implementation: Use tokio::time::interval for refill, AtomicU64 for tokens.
+    // /// acquire() decrements tokens, schedule() waits for refill if empty.
+    // /// Burst allows temporary spikes above steady rate.
+    // /// struct: { rate: f64, burst: usize, tokens: AtomicU64, last_refill: Mutex<Instant> }
+    // /// Example: TokenBucket { rate: 10.0, burst: 5 } = 10 tasks/sec, burst up to 5
+    // TokenBucket { rate: f64, burst: usize },
+    //
+    // /// Weighted fair scheduling across multiple priority classes
+    // /// Implementation: Maintain separate VecDeque for each priority class.
+    // /// Use weighted round-robin: serve N tasks from high, M from normal, etc.
+    // /// Track deficit counters to ensure fairness over time.
+    // /// struct: { queues: HashMap<String, VecDeque<Task>>, weights: Vec<(String, u32)> }
+    // /// Example: WeightedFair { weights: vec![("high", 70), ("normal", 20), ("low", 10)] }
+    // WeightedFair { weights: Vec<(String, u32)> },
+    //
+    // /// Memory-aware scheduling that limits tasks based on available memory
+    // /// Implementation: Monitor system memory via /proc/meminfo or sysinfo crate.
+    // /// Pause scheduling when available memory < threshold, resume when memory freed.
+    // /// Use exponential backoff for memory checks to avoid overhead.
+    // /// struct: { max_memory_mb: usize, check_interval: Duration, semaphore: Semaphore }
+    // MemoryAware { max_memory_mb: usize },
+    //
+    // /// CPU-aware scheduling that adjusts concurrency based on CPU load
+    // /// Implementation: Sample system load via sysinfo crate every N seconds.
+    // /// Dynamically resize internal semaphore permits based on load average.
+    // /// Use PID controller for smooth adjustments, avoid oscillation.
+    // /// struct: { max_cpu_percent: f32, permits: Arc<Semaphore>, sampler: tokio::task }
+    // CpuAware { max_cpu_percent: f32 },
+    //
+    // /// Adaptive scheduler that automatically adjusts concurrency based on performance
+    // /// Implementation: Track task latency and throughput in sliding windows.
+    // /// Increase permits if latency low & throughput stable, decrease if latency spikes.
+    // /// Use additive increase, multiplicative decrease (AIMD) algorithm.
+    // /// struct: { permits: AtomicUsize, latency_tracker: RingBuffer, throughput_tracker: RingBuffer }
+    // Adaptive { initial_permits: usize },
+    //
+    // /// Throttling scheduler that enforces minimum time between task starts
+    // /// Implementation: Store last_execution time in AtomicU64 (unix timestamp).
+    // /// Before scheduling, check elapsed time and tokio::time::sleep if needed.
+    // /// Useful for rate-limiting API calls to external services.
+    // /// struct: { min_interval: Duration, last_execution: AtomicU64 }
+    // Throttling { min_interval_ms: u64 },
+    //
+    // /// Batch scheduler that groups tasks and executes them together
+    // /// Implementation: Collect tasks in Vec<Task>, use tokio::time::timeout for max_wait.
+    // /// Execute batch when size reached OR timeout expires, whichever first.
+    // /// Use futures::future::join_all for parallel execution within batch.
+    // /// struct: { batch_size: usize, max_wait: Duration, pending: Mutex<Vec<Task>> }
+    // Batch { batch_size: usize, max_wait_ms: u64 },
+    //
+    // /// Priority-based scheduler with separate queues for different priority levels
+    // /// Implementation: Three separate semaphores for high/normal/low priorities.
+    // /// Always serve high before normal, normal before low (strict priority).
+    // /// Add starvation protection: promote normal->high after timeout.
+    // /// struct: { high_sem: Semaphore, normal_sem: Semaphore, low_sem: Semaphore }
+    // Priority { high: usize, normal: usize, low: usize },
+    //
+    // /// Backpressure-aware scheduler that monitors downstream capacity
+    // /// Implementation: Track external queue depth via provided callback/metric.
+    // /// Pause scheduling when queue_threshold exceeded, resume after pause_duration.
+    // /// Use exponential backoff for repeated backpressure events.
+    // /// struct: { queue_checker: Arc<dyn Fn() -> usize>, threshold: usize, pause_duration: Duration }
+    // Backpressure { queue_threshold: usize, pause_duration_ms: u64 },
+}
+
+/// Common error handling policies for task failure management
+///
+/// These enums provide convenient access to built-in error handling policies
+/// without requiring manual construction of policy objects.
+#[derive(Debug, Clone)]
+pub enum ErrorPolicy {
+    /// Log errors but continue execution - no cancellation
+    LogOnly,
+    /// Cancel all tasks on any error (using default error patterns)
+    CancelOnError,
+    /// Cancel all tasks when specific error patterns are encountered
+    CancelOnPatterns(Vec<String>),
+    /// Cancel after a threshold number of failures
+    CancelOnThreshold { max_failures: usize },
+    /// Cancel when failure rate exceeds threshold within time window
+    CancelOnRate {
+        max_failure_rate: f32,
+        window_secs: u64,
+    },
+    // TODO: Future error policies to implement
+    //
+    // /// Retry failed tasks with exponential backoff
+    // /// Implementation: Store original task in retry queue with attempt count.
+    // /// Use tokio::time::sleep for delays: backoff_ms * 2^attempt.
+    // /// Spawn retry as new task, preserve original task_id for tracing.
+    // /// Need task cloning support in scheduler interface.
+    // /// struct: { max_attempts: usize, backoff_ms: u64, retry_queue: VecDeque<(Task, u32)> }
+    // Retry { max_attempts: usize, backoff_ms: u64 },
+    //
+    // /// Send failed tasks to a dead letter queue for later processing
+    // /// Implementation: Use tokio::sync::mpsc::channel for queue.
+    // /// Serialize task info (id, error, payload) for persistence.
+    // /// Background worker drains queue to external storage (Redis/DB).
+    // /// Include retry count and timestamps for debugging.
+    // /// struct: { queue: mpsc::Sender<DeadLetterItem>, storage: Arc<dyn DeadLetterStorage> }
+    // DeadLetter { queue_name: String },
+    //
+    // /// Execute fallback logic when tasks fail
+    // /// Implementation: Store fallback closure in Arc for thread-safety.
+    // /// Execute fallback in same context as failed task (inherit cancel token).
+    // /// Track fallback success/failure separately from original task metrics.
+    // /// Consider using enum for common fallback patterns (default value, noop, etc).
+    // /// struct: { fallback_fn: Arc<dyn Fn(TaskId, Error) -> BoxFuture<Result<()>>> }
+    // Fallback { fallback_fn: Arc<dyn Fn() -> BoxFuture<'static, Result<()>>> },
+    //
+    // /// Circuit breaker pattern - stop executing after threshold failures
+    // /// Implementation: Track state (Closed/Open/HalfOpen) with AtomicU8.
+    // /// Use failure window (last N tasks) or time window for threshold.
+    // /// In Open state, reject tasks immediately, use timer for recovery.
+    // /// In HalfOpen, allow one test task to check if issues resolved.
+    // /// struct: { state: AtomicU8, failure_count: AtomicU64, last_failure: AtomicU64 }
+    // CircuitBreaker { failure_threshold: usize, timeout_secs: u64 },
+    //
+    // /// Resource protection policy that monitors memory/CPU usage
+    // /// Implementation: Background task samples system resources via sysinfo.
+    // /// Cancel tracker when memory > threshold, use process-level monitoring.
+    // /// Implement graceful degradation: warn at 80%, cancel at 90%.
+    // /// Include both system-wide and process-specific thresholds.
+    // /// struct: { monitor_task: JoinHandle, thresholds: ResourceThresholds, cancel_token: CancellationToken }
+    // ResourceProtection { max_memory_mb: usize },
+    //
+    // /// Timeout policy that cancels tasks exceeding maximum duration
+    // /// Implementation: Wrap each task with tokio::time::timeout.
+    // /// Store task start time, check duration in on_error callback.
+    // /// Distinguish timeout errors from other task failures in metrics.
+    // /// Consider per-task or global timeout strategies.
+    // /// struct: { max_duration: Duration, timeout_tracker: HashMap<TaskId, Instant> }
+    // Timeout { max_duration_secs: u64 },
+    //
+    // /// Sampling policy that only logs a percentage of errors
+    // /// Implementation: Use thread-local RNG for sampling decisions.
+    // /// Hash task_id for deterministic sampling (same task always sampled).
+    // /// Store sample rate as f32, compare with rand::random::<f32>().
+    // /// Include rate in log messages for context.
+    // /// struct: { sample_rate: f32, rng: ThreadLocal<RefCell<SmallRng>> }
+    // Sampling { sample_rate: f32 },
+    //
+    // /// Aggregating policy that batches error reports
+    // /// Implementation: Collect errors in Vec, flush on size or time trigger.
+    // /// Use tokio::time::interval for periodic flushing.
+    // /// Group errors by type/pattern for better insights.
+    // /// Include error frequency and rate statistics in reports.
+    // /// struct: { window: Duration, batch: Mutex<Vec<ErrorEntry>>, flush_task: JoinHandle }
+    // Aggregating { window_secs: u64, max_batch_size: usize },
+    //
+    // /// Alerting policy that sends notifications on error patterns
+    // /// Implementation: Use reqwest for webhook HTTP calls.
+    // /// Rate-limit alerts to prevent spam (max N per minute).
+    // /// Include error context, task info, and system metrics in payload.
+    // /// Support multiple notification channels (webhook, email, slack).
+    // /// struct: { client: reqwest::Client, rate_limiter: RateLimiter, alert_config: AlertConfig }
+    // Alerting { webhook_url: String, severity_threshold: String },
+}
+
+/// Common functionality for policy Arc construction
+///
+/// This trait provides a standardized `new_arc()` method for all policy types,
+/// eliminating the need for manual `Arc::new()` calls in client code.
+pub trait ArcPolicy: Sized + Send + Sync + 'static {
+    /// Create an Arc-wrapped instance of this policy
+    fn new_arc(self) -> Arc<Self> {
+        Arc::new(self)
+    }
+}
+
 /// Unique identifier for a task
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TaskId(Uuid);
@@ -136,6 +319,73 @@ pub trait TaskScheduler: Send + Sync {
         task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
         cancel_token: Option<CancellationToken>,
     ) -> SchedulingResult<Result<()>>;
+}
+
+/// Unlimited task scheduler that executes all tasks immediately
+///
+/// This scheduler provides no concurrency limits and executes all submitted tasks
+/// immediately. Useful for testing, high-throughput scenarios, or when external
+/// systems provide the concurrency control.
+///
+/// # Example
+/// ```rust
+/// # use dynamo_runtime::utils::tasks::tracker::UnlimitedScheduler;
+/// let scheduler = UnlimitedScheduler::new();
+/// ```
+#[derive(Debug)]
+pub struct UnlimitedScheduler;
+
+impl UnlimitedScheduler {
+    /// Create a new unlimited scheduler
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Create a new unlimited scheduler returning Arc
+    pub fn new_arc() -> Arc<Self> {
+        Self::new().new_arc()
+    }
+}
+
+impl Default for UnlimitedScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// Blanket implementation for all schedulers
+impl ArcPolicy for UnlimitedScheduler {}
+impl ArcPolicy for SemaphoreScheduler {}
+
+// Blanket implementation for all error policies
+impl ArcPolicy for LogOnlyPolicy {}
+impl ArcPolicy for CancelOnError {}
+impl ArcPolicy for ThresholdCancelPolicy {}
+impl ArcPolicy for RateCancelPolicy {}
+
+#[async_trait]
+impl TaskScheduler for UnlimitedScheduler {
+    async fn schedule(
+        &self,
+        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
+        cancel_token: Option<CancellationToken>,
+    ) -> SchedulingResult<Result<()>> {
+        debug!("Executing task immediately (unlimited scheduler)");
+
+        // Check for cancellation before starting
+        if let Some(ref token) = cancel_token {
+            if token.is_cancelled() {
+                debug!("Task cancelled before execution");
+                return SchedulingResult::Cancelled;
+            }
+        }
+
+        // Execute the task immediately
+        let result = task.await;
+        debug!("Task execution completed");
+
+        SchedulingResult::Execute(result)
+    }
 }
 
 /// Trait for implementing error handling policies
@@ -1619,6 +1869,11 @@ impl SemaphoreScheduler {
         Self { semaphore }
     }
 
+    /// Create a semaphore scheduler with the specified number of permits, returning Arc
+    pub fn with_permits(permits: usize) -> Arc<Self> {
+        Self::new(Arc::new(Semaphore::new(permits))).new_arc()
+    }
+
     /// Get the number of available permits
     pub fn available_permits(&self) -> usize {
         self.semaphore.available_permits()
@@ -1719,6 +1974,12 @@ impl CancelOnError {
         }
     }
 
+    /// Create a new cancel-on-error policy with default patterns, returning Arc and token
+    pub fn new_arc() -> (Arc<Self>, CancellationToken) {
+        let token = CancellationToken::new();
+        (Self::new(token.clone()).new_arc(), token)
+    }
+
     /// Create a new cancel-on-error policy with custom error patterns
     ///
     /// # Arguments
@@ -1729,6 +1990,15 @@ impl CancelOnError {
             cancel_token,
             error_patterns,
         }
+    }
+
+    /// Create a new cancel-on-error policy with custom patterns, returning Arc and token
+    pub fn with_patterns_arc(error_patterns: Vec<String>) -> (Arc<Self>, CancellationToken) {
+        let token = CancellationToken::new();
+        (
+            Self::with_patterns(token.clone(), error_patterns).new_arc(),
+            token,
+        )
     }
 }
 
@@ -1779,6 +2049,11 @@ impl LogOnlyPolicy {
     pub fn new() -> Self {
         Self
     }
+
+    /// Create a new log-only policy returning Arc
+    pub fn new_arc() -> Arc<Self> {
+        Self::new().new_arc()
+    }
 }
 
 impl Default for LogOnlyPolicy {
@@ -1800,6 +2075,179 @@ impl OnErrorPolicy for LogOnlyPolicy {
 
     async fn on_failure_threshold_exceeded(&self, failure_rate: f64) {
         warn!(?failure_rate, "Failure threshold exceeded - logging only");
+    }
+}
+
+/// Error policy that cancels tasks after a threshold number of failures
+///
+/// This policy tracks the number of failed tasks and triggers cancellation
+/// when the failure count exceeds the specified threshold. Useful for
+/// preventing cascading failures in distributed systems.
+///
+/// # Example
+/// ```rust
+/// # use dynamo_runtime::utils::tasks::tracker::ThresholdCancelPolicy;
+/// // Cancel after 5 failures
+/// let (policy, token) = ThresholdCancelPolicy::new_arc(5);
+/// ```
+pub struct ThresholdCancelPolicy {
+    cancel_token: CancellationToken,
+    max_failures: usize,
+    failure_count: AtomicU64,
+}
+
+impl ThresholdCancelPolicy {
+    /// Create a new threshold cancel policy
+    ///
+    /// # Arguments
+    /// * `cancel_token` - Token to cancel when threshold is exceeded
+    /// * `max_failures` - Maximum number of failures before cancellation
+    pub fn new(cancel_token: CancellationToken, max_failures: usize) -> Self {
+        Self {
+            cancel_token,
+            max_failures,
+            failure_count: AtomicU64::new(0),
+        }
+    }
+
+    /// Create a new threshold cancel policy returning Arc and token
+    pub fn new_arc(max_failures: usize) -> (Arc<Self>, CancellationToken) {
+        let token = CancellationToken::new();
+        (Self::new(token.clone(), max_failures).new_arc(), token)
+    }
+
+    /// Get the current failure count
+    pub fn failure_count(&self) -> u64 {
+        self.failure_count.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait]
+impl OnErrorPolicy for ThresholdCancelPolicy {
+    fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
+        // Child gets a child cancel token and inherits the same failure threshold
+        Arc::new(ThresholdCancelPolicy {
+            cancel_token: self.cancel_token.child_token(),
+            max_failures: self.max_failures,
+            failure_count: AtomicU64::new(0), // Child starts with fresh count
+        })
+    }
+
+    async fn on_error(&self, error: &anyhow::Error, task_id: TaskId) {
+        error!(?task_id, ?error, "Task failed");
+
+        let current_failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        if current_failures >= self.max_failures as u64 {
+            warn!(
+                ?task_id,
+                current_failures,
+                max_failures = self.max_failures,
+                "Failure threshold exceeded, triggering cancellation"
+            );
+            self.cancel_token.cancel();
+        } else {
+            debug!(
+                ?task_id,
+                current_failures,
+                max_failures = self.max_failures,
+                "Task failed, tracking failure count"
+            );
+        }
+    }
+
+    async fn on_failure_threshold_exceeded(&self, failure_rate: f64) {
+        warn!(?failure_rate, "Failure threshold exceeded");
+    }
+
+    fn should_cancel_on_error(&self, _error: &anyhow::Error) -> bool {
+        // We handle cancellation logic in on_error, not here
+        false
+    }
+
+    fn cancellation_token(&self) -> Option<CancellationToken> {
+        Some(self.cancel_token.clone())
+    }
+}
+
+/// Error policy that cancels tasks when failure rate exceeds threshold within time window
+///
+/// This policy tracks failures over a rolling time window and triggers cancellation
+/// when the failure rate exceeds the specified threshold. More sophisticated than
+/// simple count-based thresholds as it considers the time dimension.
+///
+/// # Example
+/// ```rust
+/// # use dynamo_runtime::utils::tasks::tracker::RateCancelPolicy;
+/// // Cancel if more than 50% of tasks fail within any 60-second window
+/// let (policy, token) = RateCancelPolicy::new_arc(0.5, 60);
+/// ```
+pub struct RateCancelPolicy {
+    cancel_token: CancellationToken,
+    max_failure_rate: f32,
+    window_secs: u64,
+    // TODO: Implement time-window tracking when needed
+    // For now, this is a placeholder structure with the interface defined
+}
+
+impl RateCancelPolicy {
+    /// Create a new rate-based cancel policy
+    ///
+    /// # Arguments
+    /// * `cancel_token` - Token to cancel when rate threshold is exceeded
+    /// * `max_failure_rate` - Maximum failure rate (0.0 to 1.0) before cancellation
+    /// * `window_secs` - Time window in seconds for rate calculation
+    pub fn new(cancel_token: CancellationToken, max_failure_rate: f32, window_secs: u64) -> Self {
+        Self {
+            cancel_token,
+            max_failure_rate,
+            window_secs,
+        }
+    }
+
+    /// Create a new rate-based cancel policy returning Arc and token
+    pub fn new_arc(max_failure_rate: f32, window_secs: u64) -> (Arc<Self>, CancellationToken) {
+        let token = CancellationToken::new();
+        (
+            Self::new(token.clone(), max_failure_rate, window_secs).new_arc(),
+            token,
+        )
+    }
+}
+
+#[async_trait]
+impl OnErrorPolicy for RateCancelPolicy {
+    fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
+        Arc::new(RateCancelPolicy {
+            cancel_token: self.cancel_token.child_token(),
+            max_failure_rate: self.max_failure_rate,
+            window_secs: self.window_secs,
+        })
+    }
+
+    async fn on_error(&self, error: &anyhow::Error, task_id: TaskId) {
+        error!(?task_id, ?error, "Task failed");
+
+        // TODO: Implement time-window failure rate calculation
+        // For now, just log the error
+        warn!(
+            ?task_id,
+            max_failure_rate = self.max_failure_rate,
+            window_secs = self.window_secs,
+            "Rate-based error policy - time window tracking not yet implemented"
+        );
+    }
+
+    async fn on_failure_threshold_exceeded(&self, failure_rate: f64) {
+        warn!(?failure_rate, "Failure rate threshold exceeded");
+    }
+
+    fn should_cancel_on_error(&self, _error: &anyhow::Error) -> bool {
+        false // We handle cancellation in on_error when implemented
+    }
+
+    fn cancellation_token(&self) -> Option<CancellationToken> {
+        Some(self.cancel_token.clone())
     }
 }
 
@@ -2813,5 +3261,60 @@ mod tests {
         assert!(parent.is_closed());
         assert!(child.is_closed());
         assert!(grandchild.is_closed());
+    }
+
+    #[tokio::test]
+    async fn test_unlimited_scheduler() {
+        // Test that UnlimitedScheduler executes tasks immediately
+        let scheduler = UnlimitedScheduler::new_arc();
+        let error_policy = LogOnlyPolicy::new_arc();
+        let tracker = TaskTracker::new(scheduler, error_policy);
+
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let handle = tracker.spawn(async {
+            rx.await.ok();
+            Ok(42)
+        });
+
+        // Task should be ready to execute immediately (no concurrency limit)
+        tx.send(()).ok();
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result, 42);
+
+        assert_eq!(tracker.metrics().success(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_threshold_cancel_policy() {
+        // Test that ThresholdCancelPolicy cancels after failure threshold
+        let (error_policy, cancel_token) = ThresholdCancelPolicy::new_arc(2); // Cancel after 2 failures
+        let scheduler = create_semaphore_scheduler(10);
+        let tracker = TaskTracker::new(scheduler, error_policy.clone());
+
+        // First failure - should not cancel
+        let _handle1 = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("First failure")) });
+        tokio::task::yield_now().await;
+        assert!(!cancel_token.is_cancelled());
+        assert_eq!(error_policy.failure_count(), 1);
+
+        // Second failure - should trigger cancellation
+        let _handle2 = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("Second failure")) });
+        tokio::task::yield_now().await;
+        assert!(cancel_token.is_cancelled());
+        assert_eq!(error_policy.failure_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_policy_arc_constructors() {
+        // Test that all Arc constructors work without requiring explicit Arc::new
+        let _unlimited = UnlimitedScheduler::new_arc();
+        let _semaphore = SemaphoreScheduler::with_permits(5);
+        let _log_only = LogOnlyPolicy::new_arc();
+        let (_cancel_policy, _token1) = CancelOnError::new_arc();
+        let (_threshold_policy, _token2) = ThresholdCancelPolicy::new_arc(3);
+        let (_rate_policy, _token3) = RateCancelPolicy::new_arc(0.5, 60);
+
+        // All constructors should work without explicit Arc::new calls
+        // This test ensures the convenience API reduces boilerplate
     }
 }
