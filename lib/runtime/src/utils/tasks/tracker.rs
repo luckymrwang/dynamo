@@ -643,6 +643,112 @@ impl HierarchicalTaskMetrics for ChildTaskMetrics {
     // They rely on their parent (root) tracker for metrics exposition
 }
 
+/// Builder for creating child trackers with custom policies
+///
+/// Allows flexible customization of scheduling and error handling policies
+/// for child trackers while maintaining parent-child relationships.
+pub struct ChildTrackerBuilder<'parent> {
+    parent: &'parent TaskTracker,
+    scheduler: Option<Arc<dyn TaskScheduler>>,
+    error_policy: Option<Arc<dyn OnErrorPolicy>>,
+}
+
+impl<'parent> ChildTrackerBuilder<'parent> {
+    /// Set custom scheduler for the child tracker
+    ///
+    /// If not set, the child will inherit the parent's scheduler.
+    ///
+    /// # Arguments
+    /// * `scheduler` - The scheduler to use for this child tracker
+    ///
+    /// # Example
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use tokio::sync::Semaphore;
+    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler};
+    /// # fn example(parent: &TaskTracker) {
+    /// let child = parent.child_tracker_builder()
+    ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5)))))
+    ///     .build();
+    /// # }
+    /// ```
+    pub fn scheduler(mut self, scheduler: Arc<dyn TaskScheduler>) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
+    /// Set custom error policy for the child tracker
+    ///
+    /// If not set, the child will get a child policy from the parent's error policy
+    /// (via `OnErrorPolicy::create_child()`).
+    ///
+    /// # Arguments
+    /// * `error_policy` - The error policy to use for this child tracker
+    ///
+    /// # Example
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, LogOnlyPolicy};
+    /// # fn example(parent: &TaskTracker) {
+    /// let child = parent.child_tracker_builder()
+    ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
+    ///     .build();
+    /// # }
+    /// ```
+    pub fn error_policy(mut self, error_policy: Arc<dyn OnErrorPolicy>) -> Self {
+        self.error_policy = Some(error_policy);
+        self
+    }
+
+    /// Build the child tracker with the specified configuration
+    ///
+    /// Creates a new child tracker with:
+    /// - Custom or inherited scheduler
+    /// - Custom or child error policy
+    /// - Hierarchical metrics that chain to parent
+    /// - Child cancellation token from the parent
+    /// - Independent lifecycle from parent
+    ///
+    /// # Returns
+    /// A new `Arc<TaskTracker>` configured as a child of the parent
+    pub fn build(self) -> Arc<TaskTracker> {
+        let child_cancel_token = self.parent.cancel_token.child_token();
+        let child_metrics = Arc::new(ChildTaskMetrics::new(self.parent.metrics.clone()));
+
+        // Use provided scheduler or inherit from parent
+        let scheduler = self
+            .scheduler
+            .unwrap_or_else(|| self.parent.scheduler.clone());
+
+        // Use provided error policy or create child from parent's
+        let error_policy = self
+            .error_policy
+            .unwrap_or_else(|| self.parent.error_policy.create_child());
+
+        let child = Arc::new(TaskTracker {
+            inner: TokioTaskTracker::new(),
+            parent: None, // No parent reference needed for hierarchical operations
+            scheduler,
+            error_policy,
+            metrics: child_metrics,
+            cancel_token: child_cancel_token,
+            children: Arc::new(RwLock::new(Vec::new())),
+        });
+
+        // Register this child with the parent for hierarchical operations
+        self.parent
+            .children
+            .write()
+            .unwrap()
+            .push(Arc::downgrade(&child));
+
+        // Periodically clean up dead children to prevent unbounded growth
+        self.parent.cleanup_dead_children();
+
+        child
+    }
+}
+
 /// Hierarchical task tracker with pluggable scheduling and error policies
 ///
 /// TaskTracker provides a composable system for managing background tasks with:
@@ -847,44 +953,40 @@ impl TaskTracker {
         child
     }
 
-    /// Create a child tracker with a different error policy
+    /// Create a child tracker builder for flexible customization
     ///
-    /// # Arguments
-    /// * `error_policy` - New error policy for the child tracker
+    /// The builder allows you to customize scheduling and error policies for the child tracker.
+    /// If not specified, policies are inherited from the parent.
     ///
     /// # Example
     /// ```rust
     /// # use std::sync::Arc;
-    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, LogOnlyPolicy};
+    /// # use tokio::sync::Semaphore;
+    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # fn example(root_tracker: TaskTracker) {
-    /// let different_policy = Arc::new(LogOnlyPolicy::new());
-    /// let child_tracker = root_tracker.child_tracker_with_policy(different_policy);
+    /// // Custom scheduler, inherit error policy
+    /// let child1 = root_tracker.child_tracker_builder()
+    ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5)))))
+    ///     .build();
+    ///
+    /// // Custom error policy, inherit scheduler
+    /// let child2 = root_tracker.child_tracker_builder()
+    ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
+    ///     .build();
+    ///
+    /// // Both custom
+    /// let child3 = root_tracker.child_tracker_builder()
+    ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(3)))))
+    ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
+    ///     .build();
     /// # }
     /// ```
-    pub fn child_tracker_with_policy(
-        &self,
-        error_policy: Arc<dyn OnErrorPolicy>,
-    ) -> Arc<TaskTracker> {
-        let child_cancel_token = self.cancel_token.child_token();
-        let child_metrics = Arc::new(ChildTaskMetrics::new(self.metrics.clone()));
-
-        let child = Arc::new(TaskTracker {
-            inner: TokioTaskTracker::new(),
-            parent: None, // Remove problematic parent reference that uses clone
-            scheduler: self.scheduler.clone(),
-            error_policy,
-            metrics: child_metrics,
-            cancel_token: child_cancel_token,
-            children: Arc::new(RwLock::new(Vec::new())),
-        });
-
-        // Register this child with the parent
-        self.children.write().unwrap().push(Arc::downgrade(&child));
-
-        // Periodically clean up dead children to prevent unbounded growth
-        self.cleanup_dead_children();
-
-        child
+    pub fn child_tracker_builder(&self) -> ChildTrackerBuilder<'_> {
+        ChildTrackerBuilder {
+            parent: self,
+            scheduler: None,
+            error_policy: None,
+        }
     }
 
     /// Spawn a new task
@@ -2115,6 +2217,55 @@ mod tests {
         assert!(child1.cancellation_token().is_cancelled());
         assert!(child2.cancellation_token().is_cancelled());
         assert!(grandchild.cancellation_token().is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn test_child_tracker_builder() {
+        // Test that child tracker builder allows custom policies
+        let parent_scheduler = create_semaphore_scheduler(10);
+        let parent_error_policy = create_log_policy();
+        let parent = TaskTracker::new(parent_scheduler, parent_error_policy);
+
+        // Test custom scheduler, inherit error policy
+        let child_scheduler = create_semaphore_scheduler(5);
+        let child1 = parent
+            .child_tracker_builder()
+            .scheduler(child_scheduler.clone())
+            .build();
+
+        // Test custom error policy, inherit scheduler
+        let (child_error_policy, _) = create_cancel_policy();
+        let child2 = parent
+            .child_tracker_builder()
+            .error_policy(child_error_policy)
+            .build();
+
+        // Test both custom
+        let another_scheduler = create_semaphore_scheduler(3);
+        let another_error_policy = create_log_policy();
+        let child3 = parent
+            .child_tracker_builder()
+            .scheduler(another_scheduler)
+            .error_policy(another_error_policy)
+            .build();
+
+        // Test that all children are properly registered
+        assert_eq!(parent.child_count(), 3);
+
+        // Test that custom schedulers work
+        let handle1 = child1.spawn(async { Ok(1) });
+        let handle2 = child2.spawn(async { Ok(2) });
+        let handle3 = child3.spawn(async { Ok(3) });
+
+        assert_eq!(handle1.await.unwrap().unwrap(), 1);
+        assert_eq!(handle2.await.unwrap().unwrap(), 2);
+        assert_eq!(handle3.await.unwrap().unwrap(), 3);
+
+        // Verify metrics still work
+        assert_eq!(parent.metrics().success(), 3); // All child successes roll up
+        assert_eq!(child1.metrics().success(), 1);
+        assert_eq!(child2.metrics().success(), 1);
+        assert_eq!(child3.metrics().success(), 1);
     }
 
     #[tokio::test]
