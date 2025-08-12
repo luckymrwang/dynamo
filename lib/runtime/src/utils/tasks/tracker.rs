@@ -190,12 +190,52 @@ use async_trait::async_trait;
 use derive_builder::Builder;
 use std::collections::HashSet;
 use std::sync::{Mutex, RwLock, Weak};
+use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker as TokioTaskTracker;
 use tracing::{debug, error, warn, Instrument};
 use uuid::Uuid;
+
+/// Error type for task execution results
+///
+/// This enum distinguishes between task cancellation and actual failures,
+/// enabling proper metrics tracking and error handling.
+#[derive(Error, Debug)]
+pub enum TaskError {
+    /// Task was cancelled (either via cancellation token or tracker shutdown)
+    #[error("Task was cancelled")]
+    Cancelled,
+
+    /// Task failed with an error
+    #[error(transparent)]
+    Failed(#[from] anyhow::Error),
+}
+
+impl TaskError {
+    /// Check if this error represents a cancellation
+    ///
+    /// This is a convenience method for compatibility and readability.
+    pub fn is_cancellation(&self) -> bool {
+        matches!(self, TaskError::Cancelled)
+    }
+
+    /// Check if this error represents a failure
+    pub fn is_failure(&self) -> bool {
+        matches!(self, TaskError::Failed(_))
+    }
+
+    /// Get the underlying anyhow::Error for failures, or a cancellation error for cancellations
+    ///
+    /// This is provided for compatibility with existing code that expects anyhow::Error.
+    pub fn into_anyhow(self) -> anyhow::Error {
+        match self {
+            TaskError::Failed(err) => err,
+            TaskError::Cancelled => anyhow::anyhow!("Task was cancelled"),
+        }
+    }
+}
 
 /// Common scheduling policies for task execution
 ///
@@ -1494,7 +1534,7 @@ impl TaskTracker {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn spawn<F, T>(&self, future: F) -> JoinHandle<Result<T>>
+    pub fn spawn<F, T>(&self, future: F) -> JoinHandle<Result<T, TaskError>>
     where
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
@@ -1557,7 +1597,7 @@ impl TaskTracker {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn spawn_cancellable<F, Fut, T>(&self, task_fn: F) -> JoinHandle<Result<T>>
+    pub fn spawn_cancellable<F, Fut, T>(&self, task_fn: F) -> JoinHandle<Result<T, TaskError>>
     where
         F: FnOnce(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
@@ -1577,26 +1617,45 @@ impl TaskTracker {
         // Create the future by calling the task function with the cancellation token
         let cancellable_future = task_fn(task_cancel_token.clone());
 
-        // Convert CancellableTaskResult to Result for consistency
-        let future = async move {
-            match cancellable_future.await {
-                CancellableTaskResult::Ok(value) => Ok(value),
-                CancellableTaskResult::Cancelled => Err(anyhow::anyhow!("Task was cancelled")),
-                CancellableTaskResult::Err(error) => Err(error),
-            }
-        };
-
-        // Wrap the user's future with our scheduling and error handling
+        // Handle CancellableTaskResult directly and route to proper TaskError
         let wrapped_future = async move {
-            Self::execute_with_policies(
-                task_id,
-                future,
-                scheduler,
-                error_policy,
-                metrics,
-                Some(task_cancel_token),
-            )
-            .await
+            // Execute the cancellable task first
+            let task_result = cancellable_future.await;
+
+            match task_result {
+                CancellableTaskResult::Ok(value) => {
+                    // For successful results, still go through execute_with_policies for consistency
+                    let success_future = async move { Ok(value) };
+                    Self::execute_with_policies(
+                        task_id,
+                        success_future,
+                        scheduler,
+                        error_policy,
+                        metrics,
+                        Some(task_cancel_token),
+                    )
+                    .await
+                }
+                CancellableTaskResult::Cancelled => {
+                    // Handle cancellation directly - increment metrics and return TaskError::Cancelled
+                    metrics.increment_cancelled();
+                    debug!("Task was cancelled during execution (cancellable task)");
+                    Err(TaskError::Cancelled)
+                }
+                CancellableTaskResult::Err(error) => {
+                    // For errors, go through execute_with_policies
+                    let error_future = async move { Err(error) };
+                    Self::execute_with_policies(
+                        task_id,
+                        error_future,
+                        scheduler,
+                        error_policy,
+                        metrics,
+                        Some(task_cancel_token),
+                    )
+                    .await
+                }
+            }
         };
 
         // Let tokio handle the actual task tracking
@@ -1809,7 +1868,7 @@ impl TaskTracker {
         error_policy: Arc<dyn OnErrorPolicy>,
         metrics: Arc<dyn HierarchicalTaskMetrics>,
         cancel_token: Option<CancellationToken>,
-    ) -> Result<T>
+    ) -> Result<T, TaskError>
     where
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
@@ -1865,19 +1924,22 @@ impl TaskTracker {
                         }
 
                         debug!(?error, "Task failed");
-                        Err(error)
+                        Err(TaskError::Failed(error))
                     }
                 }
             }
             SchedulingResult::Cancelled => {
                 metrics.increment_cancelled();
                 debug!("Task was cancelled during resource acquisition");
-                Err(anyhow::anyhow!("Task was cancelled"))
+                Err(TaskError::Cancelled)
             }
             SchedulingResult::Rejected(reason) => {
                 metrics.increment_rejected();
                 debug!(reason, "Task was rejected by scheduler");
-                Err(anyhow::anyhow!("Task rejected: {}", reason))
+                Err(TaskError::Failed(anyhow::anyhow!(
+                    "Task rejected: {}",
+                    reason
+                )))
             }
         };
 
@@ -2470,7 +2532,7 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("test error"));
+        assert!(matches!(result.unwrap_err(), TaskError::Failed(_)));
 
         // Verify metrics
         assert_eq!(tracker.metrics().success(), 0);
@@ -2585,7 +2647,7 @@ mod tests {
         // Task should be cancelled
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
     }
 
     #[tokio::test]
@@ -2841,7 +2903,103 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_task_metrics_tracking() {
+        // Test that properly cancelled tasks increment cancelled metrics, not failed metrics
+        let scheduler = create_semaphore_scheduler(5);
+        let error_policy = create_log_policy();
+        let tracker = TaskTracker::new(scheduler, error_policy);
+
+        // Baseline metrics
+        assert_eq!(tracker.metrics().cancelled(), 0);
+        assert_eq!(tracker.metrics().failed(), 0);
+        assert_eq!(tracker.metrics().success(), 0);
+
+        // Test 1: Task that executes and THEN gets cancelled during execution
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
+        let (_continue_tx, continue_rx) = tokio::sync::oneshot::channel::<()>();
+
+        let handle = tracker.spawn_cancellable(|cancel_token| async move {
+            // Signal that we've started executing
+            start_tx.send(()).ok();
+
+            // Wait for either continuation signal or cancellation
+            tokio::select! {
+                _ = continue_rx => CancellableTaskResult::Ok("completed normally"),
+                _ = cancel_token.cancelled() => {
+                    println!("Task detected cancellation and is returning Cancelled");
+                    CancellableTaskResult::Cancelled
+                },
+            }
+        });
+
+        // Wait for task to start executing
+        start_rx.await.ok();
+
+        // Now cancel while the task is running
+        println!("Cancelling tracker while task is executing...");
+        tracker.cancel();
+
+        // Wait for the task to complete
+        let result = handle.await.unwrap();
+
+        // Debug output
+        println!("Task result: {:?}", result);
+        println!(
+            "Cancelled: {}, Failed: {}, Success: {}",
+            tracker.metrics().cancelled(),
+            tracker.metrics().failed(),
+            tracker.metrics().success()
+        );
+
+        // The task should be properly cancelled and counted correctly
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
+
+        // Verify proper metrics: should be counted as cancelled, not failed
+        assert_eq!(
+            tracker.metrics().cancelled(),
+            1,
+            "Properly cancelled task should increment cancelled count"
+        );
+        assert_eq!(
+            tracker.metrics().failed(),
+            0,
+            "Properly cancelled task should NOT increment failed count"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_cancellable_vs_error_metrics_distinction() {
+        // Test that we properly distinguish between cancellation and actual errors
+        let scheduler = create_semaphore_scheduler(5);
+        let error_policy = create_log_policy();
+        let tracker = TaskTracker::new(scheduler, error_policy);
+
+        // Test 1: Actual error should increment failed count
+        let handle1 = tracker.spawn_cancellable(|_cancel_token| async move {
+            CancellableTaskResult::<i32>::Err(anyhow::anyhow!("This is a real error"))
+        });
+
+        let result1 = handle1.await.unwrap();
+        assert!(result1.is_err());
+        assert!(matches!(result1.unwrap_err(), TaskError::Failed(_)));
+        assert_eq!(tracker.metrics().failed(), 1);
+        assert_eq!(tracker.metrics().cancelled(), 0);
+
+        // Test 2: Cancellation should increment cancelled count
+        let handle2 = tracker.spawn_cancellable(|_cancel_token| async move {
+            CancellableTaskResult::<i32>::Cancelled
+        });
+
+        let result2 = handle2.await.unwrap();
+        assert!(result2.is_err());
+        assert!(matches!(result2.unwrap_err(), TaskError::Cancelled));
+        assert_eq!(tracker.metrics().failed(), 1); // Still 1 from before
+        assert_eq!(tracker.metrics().cancelled(), 1); // Now 1 from cancellation
     }
 
     #[tokio::test]
@@ -2858,7 +3016,7 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("test error"));
+        assert!(matches!(result.unwrap_err(), TaskError::Failed(_)));
         assert_eq!(tracker.metrics().failed(), 1);
     }
 
@@ -2883,7 +3041,7 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
     }
 
     #[tokio::test]
@@ -2919,7 +3077,7 @@ mod tests {
         // The waiting task should be cancelled
         let result = handle.await.unwrap();
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
     }
 
     #[tokio::test]
