@@ -1451,9 +1451,7 @@ impl TaskTrackerBuilder {
             .metrics
             .unwrap_or_else(|| Arc::new(DefaultRootTaskMetrics::new()));
 
-        let cancel_token = self
-            .cancel_token
-            .unwrap_or_else(|| CancellationToken::new());
+        let cancel_token = self.cancel_token.unwrap_or_default();
 
         let inner = TaskTrackerInner {
             tokio_tracker: TokioTaskTracker::new(),
@@ -2404,10 +2402,9 @@ impl CancelOnError {
     /// Returns a policy with no error patterns, meaning it will cancel the TaskTracker
     /// on any task failure.
     pub fn new() -> Arc<Self> {
-        let policy = Arc::new(Self {
+        Arc::new(Self {
             error_patterns: vec![], // Empty patterns = cancel on any error
-        });
-        policy
+        })
     }
 
     /// Create a new cancel-on-error policy with custom error patterns, returning Arc and token
@@ -2509,11 +2506,10 @@ impl ThresholdCancelPolicy {
     /// # Arguments
     /// * `max_failures` - Maximum number of failures before cancellation
     pub fn with_threshold(max_failures: usize) -> Arc<Self> {
-        let policy = Arc::new(Self {
+        Arc::new(Self {
             max_failures,
             failure_count: AtomicU64::new(0),
-        });
-        policy
+        })
     }
 
     /// Get the current failure count
