@@ -338,7 +338,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 //
                 // we should debug_assert that "query_instance_id" is not set
                 let (instance_id, overlap_amount) =
-                    if let Some(instance_id) = request.nvext.query_instance_id {
+                    if let Some(instance_id) = request.external_routing_hint {
                         (instance_id, 0)
                     } else {
                         self.chooser
