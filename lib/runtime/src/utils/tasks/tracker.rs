@@ -1798,10 +1798,11 @@ impl TaskTracker {
         TaskId::new()
     }
 
-    /// Collect all trackers in the hierarchy using iterative depth-first traversal
+    /// Collect all trackers in the hierarchy using iterative pre-order traversal
     ///
     /// Returns trackers in bottom-up order (children before parents) for safe shutdown.
-    /// This avoids recursive async calls and associated heap allocations.
+    /// Uses reversed pre-order to achieve post-order semantics without recursion,
+    /// avoiding stack overflow for deep hierarchies and associated heap allocations.
     fn collect_hierarchy(start: Arc<TaskTracker>) -> Vec<Arc<TaskTracker>> {
         let mut result = Vec::new();
         let mut stack = vec![start];
