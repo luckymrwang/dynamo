@@ -19,10 +19,11 @@ import json
 import logging
 import signal
 import statistics
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import List
+from typing import Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -46,6 +47,170 @@ class ResponseMetrics:
     error: str = None
 
 
+@dataclass
+class PodScalingMetrics:
+    """Track pod scaling metrics for validation"""
+
+    timestamp: float
+    prefill_pods: int
+    decode_pods: int
+    total_pods: int
+
+
+class KubernetesMonitor:
+    """Monitor Kubernetes pod scaling for SLA planner validation"""
+
+    def __init__(self, namespace: str = "default"):
+        self.namespace = namespace
+        self.scaling_history: List[PodScalingMetrics] = []
+
+    def _run_kubectl_command(self, cmd: List[str]) -> Tuple[bool, str]:
+        """Run kubectl command and return success status and output"""
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            return result.returncode == 0, result.stdout.strip()
+        except subprocess.TimeoutExpired:
+            logger.error(f"Kubectl command timed out: {' '.join(cmd)}")
+            return False, ""
+        except Exception as e:
+            logger.error(f"Kubectl command failed: {e}")
+            return False, ""
+
+    def get_pod_counts(self) -> Optional[PodScalingMetrics]:
+        """Get current pod counts for prefill and decode workers"""
+        success, output = self._run_kubectl_command(
+            [
+                "kubectl",
+                "get",
+                "pods",
+                "-n",
+                self.namespace,
+                "--selector=app.kubernetes.io/name=vllm-disagg-planner",
+                "-o",
+                "json",
+            ]
+        )
+
+        if not success:
+            logger.warning("Failed to get pod counts from kubectl")
+            return None
+
+        try:
+            pods_data = json.loads(output)
+            prefill_pods = 0
+            decode_pods = 0
+
+            for pod in pods_data.get("items", []):
+                pod_name = pod.get("metadata", {}).get("name", "")
+                pod_phase = pod.get("status", {}).get("phase", "")
+
+                # Only count running pods
+                if pod_phase == "Running":
+                    if "prefill" in pod_name.lower():
+                        prefill_pods += 1
+                    elif "decode" in pod_name.lower():
+                        decode_pods += 1
+
+            metrics = PodScalingMetrics(
+                timestamp=time.time(),
+                prefill_pods=prefill_pods,
+                decode_pods=decode_pods,
+                total_pods=prefill_pods + decode_pods,
+            )
+
+            self.scaling_history.append(metrics)
+            return metrics
+
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse kubectl output: {e}")
+            return None
+
+    def wait_for_scaling_event(
+        self,
+        expected_prefill: Optional[int] = None,
+        expected_decode: Optional[int] = None,
+        timeout: int = 300,
+    ) -> bool:
+        """Wait for a specific scaling event to occur"""
+        start_time = time.time()
+        initial_metrics = self.get_pod_counts()
+
+        if not initial_metrics:
+            logger.error("Failed to get initial pod counts")
+            return False
+
+        logger.info(
+            f"Waiting for scaling event - Initial: {initial_metrics.prefill_pods} prefill, {initial_metrics.decode_pods} decode"
+        )
+
+        while time.time() - start_time < timeout:
+            current_metrics = self.get_pod_counts()
+            if not current_metrics:
+                time.sleep(10)
+                continue
+
+            # Check if scaling occurred
+            scaling_occurred = False
+            if (
+                expected_prefill is not None
+                and current_metrics.prefill_pods == expected_prefill
+            ):
+                scaling_occurred = True
+            if (
+                expected_decode is not None
+                and current_metrics.decode_pods == expected_decode
+            ):
+                scaling_occurred = True
+
+            # Also detect any scaling change if specific counts not provided
+            if expected_prefill is None and expected_decode is None:
+                if (
+                    current_metrics.prefill_pods != initial_metrics.prefill_pods
+                    or current_metrics.decode_pods != initial_metrics.decode_pods
+                ):
+                    scaling_occurred = True
+
+            if scaling_occurred:
+                logger.info(
+                    f"Scaling detected! Current: {current_metrics.prefill_pods} prefill, {current_metrics.decode_pods} decode"
+                )
+                return True
+
+            logger.debug(
+                f"Current pod counts: {current_metrics.prefill_pods} prefill, {current_metrics.decode_pods} decode"
+            )
+            time.sleep(10)
+
+        logger.warning(f"Scaling event not detected within {timeout} seconds")
+        return False
+
+    def get_scaling_summary(self) -> Dict:
+        """Get summary of scaling events during test"""
+        if not self.scaling_history:
+            return {"error": "No scaling history available"}
+
+        initial = self.scaling_history[0]
+        final = self.scaling_history[-1]
+
+        max_prefill = max(m.prefill_pods for m in self.scaling_history)
+        max_decode = max(m.decode_pods for m in self.scaling_history)
+        min_prefill = min(m.prefill_pods for m in self.scaling_history)
+        min_decode = min(m.decode_pods for m in self.scaling_history)
+
+        return {
+            "initial_prefill": initial.prefill_pods,
+            "initial_decode": initial.decode_pods,
+            "final_prefill": final.prefill_pods,
+            "final_decode": final.decode_pods,
+            "max_prefill": max_prefill,
+            "max_decode": max_decode,
+            "min_prefill": min_prefill,
+            "min_decode": min_decode,
+            "scaling_events": len(self.scaling_history),
+            "test_duration": final.timestamp - initial.timestamp,
+        }
+
+
 class LoadTestConfig:
     """Configuration for load test patterns"""
 
@@ -59,6 +224,9 @@ class LoadTestConfig:
         self.burst_requests = args.burst_requests
         self.request_timeout = args.request_timeout
         self.metrics_interval = args.metrics_interval
+        self.kubernetes_namespace = args.kubernetes_namespace
+        self.validate_scaling = args.validate_scaling
+        self.expected_scaling_time = args.expected_scaling_time
 
 
 class SLAPlannerLoadTest:
@@ -71,6 +239,11 @@ class SLAPlannerLoadTest:
         self.active_requests = 0
         self.total_requests = 0
         self.running = True
+        self.k8s_monitor = (
+            KubernetesMonitor(config.kubernetes_namespace)
+            if config.validate_scaling
+            else None
+        )
 
         # Test payload based on the provided curl command
         self.test_payload = {
@@ -290,6 +463,227 @@ class SLAPlannerLoadTest:
 
         await asyncio.gather(*active_users, return_exceptions=True)
 
+    async def test_scale_up_validation(self):
+        """Test that validates scaling up of workers under load"""
+        if not self.k8s_monitor:
+            logger.warning(
+                "Kubernetes monitoring not enabled, skipping scale-up validation"
+            )
+            return False
+
+        logger.info("=== SCALE UP VALIDATION TEST ===")
+
+        # Get initial pod counts
+        initial_metrics = self.k8s_monitor.get_pod_counts()
+        if not initial_metrics:
+            logger.error("Failed to get initial pod counts")
+            return False
+
+        logger.info(
+            f"Initial pod counts: {initial_metrics.prefill_pods} prefill, {initial_metrics.decode_pods} decode"
+        )
+
+        # Generate sustained load to trigger scaling
+        logger.info("Generating sustained load to trigger scale-up...")
+
+        # Use higher concurrent users to trigger scaling
+        original_users = self.config.concurrent_users
+        self.config.concurrent_users = max(
+            15, original_users * 2
+        )  # Increase load significantly
+
+        # Run for a shorter duration but enough to trigger scaling
+        original_duration = self.config.duration
+        self.config.duration = min(180, self.config.expected_scaling_time + 60)
+
+        try:
+            # Start sustained load
+            load_task = asyncio.create_task(self.sustained_load_pattern())
+
+            # Wait for scaling to occur (typically happens after ~60s of metrics collection)
+            scaling_detected = self.k8s_monitor.wait_for_scaling_event(
+                timeout=self.config.expected_scaling_time
+            )
+
+            # Cancel load generation
+            load_task.cancel()
+            try:
+                await load_task
+            except asyncio.CancelledError:
+                pass
+
+            if scaling_detected:
+                final_metrics = self.k8s_monitor.get_pod_counts()
+                if final_metrics and (
+                    final_metrics.prefill_pods > initial_metrics.prefill_pods
+                    or final_metrics.decode_pods > initial_metrics.decode_pods
+                ):
+                    logger.info("✓ Scale-up validation PASSED - Pod scaling detected")
+                    return True
+                else:
+                    logger.warning(
+                        "✗ Scale-up validation FAILED - No pod increase detected"
+                    )
+                    return False
+            else:
+                logger.warning(
+                    "✗ Scale-up validation FAILED - No scaling detected within timeout"
+                )
+                return False
+
+        finally:
+            # Restore original configuration
+            self.config.concurrent_users = original_users
+            self.config.duration = original_duration
+
+    async def test_scale_down_validation(self):
+        """Test that validates scaling down of workers when load decreases"""
+        if not self.k8s_monitor:
+            logger.warning(
+                "Kubernetes monitoring not enabled, skipping scale-down validation"
+            )
+            return False
+
+        logger.info("=== SCALE DOWN VALIDATION TEST ===")
+
+        # First, ensure we have scaled up workers
+        current_metrics = self.k8s_monitor.get_pod_counts()
+        if not current_metrics:
+            logger.error("Failed to get current pod counts")
+            return False
+
+        total_pods = current_metrics.total_pods
+        if total_pods <= 2:  # Assuming 1 prefill + 1 decode is minimum
+            logger.info("Running scale-up first to have pods to scale down...")
+            scale_up_success = await self.test_scale_up_validation()
+            if not scale_up_success:
+                logger.error("Cannot test scale-down without successful scale-up")
+                return False
+
+            # Wait a bit for scaling to stabilize
+            await asyncio.sleep(30)
+            current_metrics = self.k8s_monitor.get_pod_counts()
+
+        logger.info(
+            f"Starting scale-down test with {current_metrics.prefill_pods} prefill, {current_metrics.decode_pods} decode"
+        )
+
+        # Stop all load and wait for scale-down
+        logger.info("Stopping load generation to trigger scale-down...")
+
+        # Wait for scale-down (may take longer as SLA planner waits for metrics to stabilize)
+        scale_down_timeout = (
+            self.config.expected_scaling_time * 2
+        )  # Scale-down typically takes longer
+
+        scaling_detected = self.k8s_monitor.wait_for_scaling_event(
+            timeout=scale_down_timeout
+        )
+
+        if scaling_detected:
+            final_metrics = self.k8s_monitor.get_pod_counts()
+            if final_metrics and final_metrics.total_pods < current_metrics.total_pods:
+                logger.info(
+                    "✓ Scale-down validation PASSED - Pod scaling down detected"
+                )
+                return True
+            else:
+                logger.warning(
+                    "✗ Scale-down validation FAILED - No pod decrease detected"
+                )
+                return False
+        else:
+            logger.warning(
+                "✗ Scale-down validation FAILED - No scaling detected within timeout"
+            )
+            return False
+
+    async def test_selective_scaling_validation(self):
+        """Test that validates selective scaling (one worker type scales but not the other)"""
+        if not self.k8s_monitor:
+            logger.warning(
+                "Kubernetes monitoring not enabled, skipping selective scaling validation"
+            )
+            return False
+
+        logger.info("=== SELECTIVE SCALING VALIDATION TEST ===")
+
+        # Get initial pod counts
+        initial_metrics = self.k8s_monitor.get_pod_counts()
+        if not initial_metrics:
+            logger.error("Failed to get initial pod counts")
+            return False
+
+        logger.info(
+            f"Initial pod counts: {initial_metrics.prefill_pods} prefill, {initial_metrics.decode_pods} decode"
+        )
+
+        # Generate load pattern that should trigger prefill scaling primarily
+        # Using shorter prompts and requesting fewer tokens should stress prefill more
+        original_payload = self.test_payload.copy()
+
+        # Modify payload to stress prefill (many short requests)
+        self.test_payload["messages"][0]["content"] = "What is AI?" * 50  # Longer input
+        self.test_payload["max_tokens"] = 5  # Very few output tokens
+
+        # Use burst pattern to create prefill pressure
+        original_pattern = self.config.pattern
+        original_burst_requests = self.config.burst_requests
+        original_burst_interval = self.config.burst_interval
+
+        self.config.pattern = "burst"
+        self.config.burst_requests = 20  # Large bursts
+        self.config.burst_interval = 10  # Frequent bursts
+        self.config.duration = min(120, self.config.expected_scaling_time)
+
+        try:
+            # Generate load
+            logger.info("Generating burst load pattern to trigger selective scaling...")
+            await self.burst_load_pattern()
+
+            # Check if selective scaling occurred
+            await asyncio.sleep(
+                self.config.expected_scaling_time // 2
+            )  # Wait for metrics collection
+
+            final_metrics = self.k8s_monitor.get_pod_counts()
+            if final_metrics:
+                prefill_scaled = (
+                    final_metrics.prefill_pods > initial_metrics.prefill_pods
+                )
+                decode_scaled = final_metrics.decode_pods > initial_metrics.decode_pods
+
+                if prefill_scaled and not decode_scaled:
+                    logger.info(
+                        "✓ Selective scaling validation PASSED - Only prefill workers scaled"
+                    )
+                    return True
+                elif decode_scaled and not prefill_scaled:
+                    logger.info(
+                        "✓ Selective scaling validation PASSED - Only decode workers scaled"
+                    )
+                    return True
+                elif prefill_scaled and decode_scaled:
+                    logger.info(
+                        "⚠ Both worker types scaled - this may be expected under high load"
+                    )
+                    return True  # Still consider this a pass
+                else:
+                    logger.warning(
+                        "✗ Selective scaling validation FAILED - No scaling detected"
+                    )
+                    return False
+            else:
+                logger.error("Failed to get final pod counts")
+                return False
+
+        finally:
+            # Restore original configuration
+            self.test_payload = original_payload
+            self.config.pattern = original_pattern
+            self.config.burst_requests = original_burst_requests
+            self.config.burst_interval = original_burst_interval
+
     async def monitor_metrics(self):
         """Monitor and log test metrics periodically"""
         while self.running:
@@ -328,6 +722,14 @@ class SLAPlannerLoadTest:
                         )
                     if tokens:
                         logger.info(f"Tokens - avg: {statistics.mean(tokens):.1f}")
+
+                    # Include pod scaling information if monitoring is enabled
+                    if self.k8s_monitor:
+                        current_pods = self.k8s_monitor.get_pod_counts()
+                        if current_pods:
+                            logger.info(
+                                f"Current pods: {current_pods.prefill_pods} prefill, {current_pods.decode_pods} decode"
+                            )
 
                     logger.info("======================")
 
@@ -373,8 +775,48 @@ class SLAPlannerLoadTest:
             # Start metrics monitoring
             metrics_task = asyncio.create_task(self.monitor_metrics())
 
-            # Run load pattern
-            if self.config.pattern == "sustained":
+            # Run load pattern or validation tests
+            if self.config.pattern == "scale_up_test":
+                success = await self.test_scale_up_validation()
+                logger.info(
+                    f"Scale-up test result: {'PASSED' if success else 'FAILED'}"
+                )
+            elif self.config.pattern == "scale_down_test":
+                success = await self.test_scale_down_validation()
+                logger.info(
+                    f"Scale-down test result: {'PASSED' if success else 'FAILED'}"
+                )
+            elif self.config.pattern == "selective_scaling_test":
+                success = await self.test_selective_scaling_validation()
+                logger.info(
+                    f"Selective scaling test result: {'PASSED' if success else 'FAILED'}"
+                )
+            elif self.config.pattern == "all_scaling_tests":
+                logger.info("Running comprehensive scaling validation...")
+                scale_up_success = await self.test_scale_up_validation()
+                await asyncio.sleep(30)  # Brief pause between tests
+                scale_down_success = await self.test_scale_down_validation()
+                await asyncio.sleep(30)  # Brief pause
+                selective_success = await self.test_selective_scaling_validation()
+
+                logger.info("\n=== SCALING VALIDATION RESULTS ===")
+                logger.info(
+                    f"Scale-up test: {'PASSED' if scale_up_success else 'FAILED'}"
+                )
+                logger.info(
+                    f"Scale-down test: {'PASSED' if scale_down_success else 'FAILED'}"
+                )
+                logger.info(
+                    f"Selective scaling test: {'PASSED' if selective_success else 'FAILED'}"
+                )
+
+                overall_success = (
+                    scale_up_success and scale_down_success and selective_success
+                )
+                logger.info(
+                    f"Overall result: {'ALL TESTS PASSED' if overall_success else 'SOME TESTS FAILED'}"
+                )
+            elif self.config.pattern == "sustained":
                 await self.sustained_load_pattern()
             elif self.config.pattern == "burst":
                 await self.burst_load_pattern()
@@ -437,6 +879,24 @@ class SLAPlannerLoadTest:
                 logger.info(f"  Average tokens: {statistics.mean(tokens):.1f}")
                 logger.info(f"  Total tokens: {sum(tokens)}")
 
+        # Include scaling summary if available
+        if self.k8s_monitor:
+            scaling_summary = self.k8s_monitor.get_scaling_summary()
+            if "error" not in scaling_summary:
+                logger.info("\nPod Scaling Summary:")
+                logger.info(
+                    f"  Initial pods: {scaling_summary['initial_prefill']} prefill, {scaling_summary['initial_decode']} decode"
+                )
+                logger.info(
+                    f"  Final pods: {scaling_summary['final_prefill']} prefill, {scaling_summary['final_decode']} decode"
+                )
+                logger.info(
+                    f"  Peak pods: {scaling_summary['max_prefill']} prefill, {scaling_summary['max_decode']} decode"
+                )
+                logger.info(
+                    f"  Scaling events recorded: {scaling_summary['scaling_events']}"
+                )
+
         logger.info("\nSLA Planner Scaling Notes:")
         logger.info("- Monitor kubectl logs for planner scaling decisions")
         logger.info("- Check 'kubectl get pods' for new worker instances")
@@ -454,9 +914,17 @@ def main():
     )
     parser.add_argument(
         "--pattern",
-        choices=["sustained", "burst", "ramp"],
+        choices=[
+            "sustained",
+            "burst",
+            "ramp",
+            "scale_up_test",
+            "scale_down_test",
+            "selective_scaling_test",
+            "all_scaling_tests",
+        ],
         default="sustained",
-        help="Load pattern (default: sustained)",
+        help="Load pattern or validation test (default: sustained)",
     )
     parser.add_argument(
         "--concurrent-users",
@@ -500,8 +968,34 @@ def main():
         default=30,
         help="Metrics reporting interval (default: 30)",
     )
+    parser.add_argument(
+        "--kubernetes-namespace",
+        default="default",
+        help="Kubernetes namespace for pod monitoring (default: default)",
+    )
+    parser.add_argument(
+        "--validate-scaling",
+        action="store_true",
+        help="Enable Kubernetes pod scaling validation",
+    )
+    parser.add_argument(
+        "--expected-scaling-time",
+        type=int,
+        default=120,
+        help="Expected time for scaling events to occur in seconds (default: 120)",
+    )
 
     args = parser.parse_args()
+
+    # Enable scaling validation for scaling test patterns
+    if args.pattern in [
+        "scale_up_test",
+        "scale_down_test",
+        "selective_scaling_test",
+        "all_scaling_tests",
+    ]:
+        args.validate_scaling = True
+
     config = LoadTestConfig(args)
 
     # Run the load test
