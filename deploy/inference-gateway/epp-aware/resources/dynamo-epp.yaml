@@ -33,7 +33,7 @@ spec:
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
-        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-4
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-9
         env:
           - name: USE_STREAMING
             value: "true"
@@ -63,13 +63,13 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
       - name: frontend-router
-        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:fresh
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:gw-frontend-v1
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh", "-c"]
         args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
         env:
         - name: DYNAMO_NAMESPACE
-          value: "vllm-agg"
+          value: "default"
         - name: ETCD_ENDPOINTS
           value: "http://dynamo-platform-etcd:2379"
         - name: NATS_SERVER

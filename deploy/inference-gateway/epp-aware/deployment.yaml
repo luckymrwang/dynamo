@@ -37,11 +37,11 @@ spec:
         periodSeconds: 5
         timeoutSeconds: 5
         failureThreshold: 3
-      dynamoNamespace: vllm-agg
+      dynamoNamespace: default
       componentType: main
       labels:
         nvidia.com/dynamo-component: Frontend
-        nvidia.com/dynamo-namespace: vllm-agg
+        nvidia.com/dynamo-namespace: default
       replicas: 1
       resources:
         requests:
@@ -52,7 +52,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:fresh
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:gw-frontend-v1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -80,7 +80,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: vllm-agg
+      dynamoNamespace: default
       componentType: worker
       replicas: 1
       resources:
@@ -94,7 +94,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:fresh
+          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:gw-frontend-v1
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
