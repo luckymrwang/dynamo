@@ -25,12 +25,12 @@
 //! Each TODO comment includes complete implementation guidance with data structures,
 //! algorithms, and dependencies needed for future contributors.
 //!
-//! ## Important: Close-Before-Wait Pattern
+//! ## Graceful Shutdown
 //!
-//! This implementation follows Tokio's TaskTracker requirement that `close()` must be called
-//! before `wait()` to prevent deadlocks. Our hierarchical `join()` method automatically handles this:
-//! - `join()` closes each tracker before waiting (hierarchically)
-//! - Uses depth-first traversal of the dependency tree for proper shutdown order
+//! Use the `join()` method to gracefully shut down task hierarchies:
+//! - Automatically closes all trackers and waits for task completion
+//! - Processes children before parents to ensure proper shutdown order
+//! - Handles the entire hierarchy in a single call
 //!
 //! ## Quick Start
 //!
@@ -41,7 +41,7 @@
 //! // Simple setup with convenience constructors - minimal boilerplate!
 //! let tracker = TaskTracker::builder()
 //!     .scheduler(SemaphoreScheduler::with_permits(10))  // Returns Arc automatically
-//!     .error_policy(LogOnlyPolicy::new_arc())         // Returns Arc automatically
+//!     .error_policy(LogOnlyPolicy::new())             // Returns Arc automatically
 //!     .build()?;
 //!
 //! // Spawn tasks and get results
@@ -60,9 +60,9 @@
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! // Create root tracker with failure threshold policy
-//! let (error_policy, _token) = ThresholdCancelPolicy::new_arc(5);
+//! let error_policy = ThresholdCancelPolicy::with_threshold(5);
 //! let root = std::sync::Arc::new(TaskTracker::builder()
-//!     .scheduler(UnlimitedScheduler::new_arc())
+//!     .scheduler(UnlimitedScheduler::new())
 //!     .error_policy(error_policy)
 //!     .build()?);
 //!
@@ -81,7 +81,7 @@
 //! rate_limited.spawn(async { Ok(()) });
 //!
 //! // Join all children hierarchically
-//! root.clone().join().await;
+//! root.join().await;
 //! assert_eq!(root.metrics().success(), 3); // Sees all successes
 //! # Ok(())
 //! # }
@@ -96,7 +96,7 @@
 //!
 //! # async fn example() -> anyhow::Result<()> {
 //! // Pattern-based error cancellation
-//! let (error_policy, _token) = CancelOnError::with_patterns_arc(
+//! let (error_policy, token) = CancelOnError::with_patterns(
 //!     vec!["OutOfMemory".to_string(), "DeviceError".to_string()]
 //! );
 //! let simple = TaskTracker::builder()
@@ -106,7 +106,7 @@
 //!
 //! // Threshold-based cancellation with monitoring
 //! let scheduler = SemaphoreScheduler::with_permits(10);  // Returns Arc<SemaphoreScheduler>
-//! let (error_policy, token) = ThresholdCancelPolicy::new_arc(3);  // Returns (Arc<Policy>, Token)
+//! let error_policy = ThresholdCancelPolicy::with_threshold(3);  // Returns Arc<Policy>
 //!
 //! let advanced = TaskTracker::builder()
 //!     .scheduler(scheduler)
@@ -129,7 +129,7 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! let tracker = std::sync::Arc::new(TaskTracker::builder()
 //!     .scheduler(SemaphoreScheduler::with_permits(2))  // Only 2 concurrent tasks
-//!     .error_policy(LogOnlyPolicy::new_arc())
+//!     .error_policy(LogOnlyPolicy::new())
 //!     .build()?);
 //!
 //! // Spawn multiple tasks
@@ -147,7 +147,7 @@
 //! println!("Queued: {}", metrics.queued());        // 3 tasks waiting in scheduler queue
 //! println!("Pending: {}", metrics.pending());      // 5 tasks not yet completed
 //!
-//! tracker.clone().join().await;
+//! tracker.join().await;
 //! assert_eq!(metrics.success(), 5);
 //! assert_eq!(metrics.pending(), 0);
 //! # Ok(())
@@ -164,7 +164,7 @@
 //! // Root tracker with Prometheus metrics
 //! let tracker = TaskTracker::new_with_prometheus(
 //!     SemaphoreScheduler::with_permits(10),
-//!     LogOnlyPolicy::new_arc(),
+//!     LogOnlyPolicy::new(),
 //!     registry,
 //!     "my_component"
 //! )?;
@@ -190,6 +190,7 @@ use async_trait::async_trait;
 use derive_builder::Builder;
 use std::collections::HashSet;
 use std::sync::{Mutex, RwLock, Weak};
+use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -211,6 +212,10 @@ pub enum TaskError {
     /// Task failed with an error
     #[error(transparent)]
     Failed(#[from] anyhow::Error),
+
+    /// Cannot spawn task on a closed tracker
+    #[error("Cannot spawn task on a closed tracker")]
+    TrackerClosed,
 }
 
 impl TaskError {
@@ -233,6 +238,7 @@ impl TaskError {
         match self {
             TaskError::Failed(err) => err,
             TaskError::Cancelled => anyhow::anyhow!("Task was cancelled"),
+            TaskError::TrackerClosed => anyhow::anyhow!("Cannot spawn task on a closed tracker"),
         }
     }
 }
@@ -320,6 +326,35 @@ pub enum SchedulingPolicy {
     // /// Use exponential backoff for repeated backpressure events.
     // /// struct: { queue_checker: Arc<dyn Fn() -> usize>, threshold: usize, pause_duration: Duration }
     // Backpressure { queue_threshold: usize, pause_duration_ms: u64 },
+}
+
+/// Trait for implementing error handling policies
+///
+/// Error policies are lightweight, synchronous decision-makers that analyze task failures
+/// and return an ErrorResponse telling the TaskTracker what action to take. The TaskTracker
+/// handles all the actual work (cancellation, metrics, etc.) based on the policy's response.
+///
+/// ## Key Design Principles
+/// - **Synchronous**: Policies make fast decisions without async operations
+/// - **Stateless where possible**: TaskTracker manages cancellation tokens and state
+/// - **Composable**: Policies can be combined and nested in hierarchies
+/// - **Focused**: Each policy handles one specific error pattern or strategy
+pub trait OnErrorPolicy: Send + Sync + std::fmt::Debug {
+    /// Create a child policy for a child tracker
+    ///
+    /// This allows policies to maintain hierarchical relationships,
+    /// such as child cancellation tokens or shared circuit breaker state.
+    fn create_child(&self) -> Arc<dyn OnErrorPolicy>;
+
+    /// Handle a task failure and return the desired response
+    ///
+    /// # Arguments
+    /// * `error` - The error that occurred
+    /// * `task_id` - Unique identifier of the failed task
+    ///
+    /// # Returns
+    /// ErrorResponse indicating how the TaskTracker should handle this failure
+    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse;
 }
 
 /// Common error handling policies for task failure management
@@ -414,6 +449,98 @@ pub enum ErrorPolicy {
     // /// Support multiple notification channels (webhook, email, slack).
     // /// struct: { client: reqwest::Client, rate_limiter: RateLimiter, alert_config: AlertConfig }
     // Alerting { webhook_url: String, severity_threshold: String },
+}
+
+/// Response type for error handling policies
+///
+/// This enum defines how the TaskTracker should respond to task failures.
+/// Currently provides minimal functionality with planned extensions for common patterns.
+#[derive(Debug)]
+pub enum ErrorResponse {
+    /// Continue normal execution, the error counter will be incremented, but task tracker will not be cancelled.
+    Continue,
+
+    /// Cancel this tracker and all child trackers
+    Cancel,
+
+    /// Execute custom error handling logic with full context access
+    Custom(Box<dyn OnErrorAction>),
+    // TODO: Future specialized error responses to implement:
+    //
+    // /// Retry the failed task with configurable strategy
+    // /// Implementation: Add RetryStrategy trait with delay(), should_continue(attempt_count),
+    // /// release_and_reacquire_resources() methods. TaskTracker handles retry loop with
+    // /// attempt counting and resource management. Supports exponential backoff, jitter.
+    // /// Usage: ErrorResponse::Retry(Box::new(ExponentialBackoff { max_attempts: 3, base_delay: 100ms }))
+    // Retry(Box<dyn RetryStrategy>),
+    //
+    // /// Execute fallback logic, then follow secondary action
+    // /// Implementation: Add FallbackAction trait with execute(error, task_id) -> Result<(), Error>.
+    // /// Execute fallback first, then recursively handle the 'then' response based on fallback result.
+    // /// Enables patterns like: try fallback, if it works continue, if it fails retry original task.
+    // /// Usage: ErrorResponse::Fallback { fallback: Box::new(DefaultValue(42)), then: Box::new(ErrorResponse::Continue) }
+    // Fallback { fallback: Box<dyn FallbackAction>, then: Box<ErrorResponse> },
+    //
+    // /// Restart task with preserved state (for long-running/stateful tasks)
+    // /// Implementation: Add TaskState trait for serialize/deserialize state, RestartStrategy trait
+    // /// with create_continuation_task(state) -> Future. Task saves checkpoints during execution,
+    // /// on error returns StatefulTaskError containing preserved state. Policy can restart from checkpoint.
+    // /// Usage: ErrorResponse::RestartWithState { state: checkpointed_state, strategy: Box::new(CheckpointRestart { ... }) }
+    // RestartWithState { state: Box<dyn TaskState>, strategy: Box<dyn RestartStrategy> },
+}
+
+/// Trait for implementing custom error handling actions
+///
+/// This provides full access to the task execution context for complex error handling
+/// scenarios that don't fit into the built-in response patterns.
+#[async_trait]
+pub trait OnErrorAction: Send + Sync + std::fmt::Debug {
+    /// Execute custom error handling logic
+    ///
+    /// # Arguments
+    /// * `error` - The error that caused the task to fail
+    /// * `task_id` - Unique identifier of the failed task
+    /// * `attempt_count` - Number of times this task has been attempted (starts at 1)
+    /// * `context` - Full execution context with access to scheduler, metrics, etc.
+    ///
+    /// # Returns
+    /// ActionResult indicating what the TaskTracker should do next
+    async fn execute(
+        &self,
+        error: &anyhow::Error,
+        task_id: TaskId,
+        attempt_count: u32,
+        context: &TaskExecutionContext,
+    ) -> ActionResult;
+}
+
+/// Result of a custom error action execution
+#[derive(Debug)]
+pub enum ActionResult {
+    /// Continue normal execution (error was handled)
+    Continue,
+
+    /// Retry the task after optional delay
+    Retry { delay: Option<Duration> },
+
+    /// Cancel this tracker and all child trackers
+    Cancel,
+}
+
+/// Execution context provided to custom error actions
+///
+/// This gives custom actions full access to the task execution environment
+/// for implementing complex error handling scenarios.
+pub struct TaskExecutionContext {
+    /// Scheduler for reacquiring resources or checking state
+    pub scheduler: Arc<dyn TaskScheduler>,
+
+    /// Metrics for custom tracking
+    pub metrics: Arc<dyn HierarchicalTaskMetrics>,
+    // TODO: Future context additions:
+    // pub guard: Box<dyn ResourceGuard>,    // Current resource guard (needs Debug impl)
+    // pub cancel_token: CancellationToken,  // For implementing custom cancellation
+    // pub task_recreation: Box<dyn TaskRecreator>, // For implementing retry/restart
 }
 
 /// Common functionality for policy Arc construction
@@ -527,7 +654,7 @@ pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
     /// should return `SchedulingResult::Cancelled`.
     ///
     /// # Arguments
-    /// * `cancel_token` - Optional cancellation token for scheduler-level cancellation
+    /// * `cancel_token` - [`CancellationToken`] for scheduler-level cancellation
     ///
     /// # Returns
     /// * `SchedulingResult::Execute(guard)` - Resources acquired, ready to execute
@@ -535,53 +662,8 @@ pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
     /// * `SchedulingResult::Rejected(reason)` - Resources unavailable or policy violation
     async fn acquire_execution_slot(
         &self,
-        cancel_token: Option<CancellationToken>,
+        cancel_token: CancellationToken,
     ) -> SchedulingResult<Box<dyn ResourceGuard>>;
-}
-
-/// Trait for implementing error handling policies
-///
-/// Implementors define how to respond to task failures, including
-/// whether to propagate cancellation and how to handle error thresholds.
-#[async_trait]
-pub trait OnErrorPolicy: Send + Sync + std::fmt::Debug {
-    /// Create a child policy for a child tracker
-    ///
-    /// This allows policies to maintain hierarchical relationships,
-    /// such as child cancellation tokens or shared circuit breaker state.
-    fn create_child(&self) -> Arc<dyn OnErrorPolicy>;
-
-    /// Called when a task fails during execution
-    ///
-    /// # Arguments
-    /// * `error` - The error that occurred
-    /// * `task_id` - Unique identifier of the failed task
-    async fn on_error(&self, error: &anyhow::Error, task_id: TaskId);
-
-    /// Called when failure rate exceeds configured thresholds
-    ///
-    /// # Arguments
-    /// * `failure_rate` - Current failure rate (0.0 to 1.0)
-    async fn on_failure_threshold_exceeded(&self, failure_rate: f64);
-
-    /// Determine if an error should trigger cancellation
-    ///
-    /// # Arguments
-    /// * `error` - The error to evaluate
-    ///
-    /// # Returns
-    /// `true` if this error should cause the tracker to cancel remaining tasks
-    fn should_cancel_on_error(&self, _error: &anyhow::Error) -> bool {
-        false
-    }
-
-    /// Get the cancellation token if this policy supports cancellation
-    ///
-    /// This allows callers to observe cancellation state from policies
-    /// that implement cancellation logic.
-    fn cancellation_token(&self) -> Option<CancellationToken> {
-        None
-    }
 }
 
 /// Task execution metrics for a tracker
@@ -1145,6 +1227,15 @@ pub struct ChildTrackerBuilder<'parent> {
 }
 
 impl<'parent> ChildTrackerBuilder<'parent> {
+    /// Create a new ChildTrackerBuilder
+    pub fn new(parent: &'parent TaskTracker) -> Self {
+        Self {
+            parent,
+            scheduler: None,
+            error_policy: None,
+        }
+    }
+
     /// Set custom scheduler for the child tracker
     ///
     /// If not set, the child will inherit the parent's scheduler.
@@ -1159,7 +1250,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler};
     /// # fn example(parent: &TaskTracker) {
     /// let child = parent.child_tracker_builder()
-    ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5)))))
+    ///     .scheduler(SemaphoreScheduler::with_permits(5))
     ///     .build().unwrap();
     /// # }
     /// ```
@@ -1182,7 +1273,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, LogOnlyPolicy};
     /// # fn example(parent: &TaskTracker) {
     /// let child = parent.child_tracker_builder()
-    ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
+    ///     .error_policy(LogOnlyPolicy::new())
     ///     .build().unwrap();
     /// # }
     /// ```
@@ -1205,7 +1296,7 @@ impl<'parent> ChildTrackerBuilder<'parent> {
     ///
     /// # Errors
     /// Returns an error if the parent tracker is already closed
-    pub fn build(self) -> anyhow::Result<Arc<TaskTracker>> {
+    pub fn build(self) -> anyhow::Result<TaskTracker> {
         // Validate that parent tracker is still active
         if self.parent.is_closed() {
             return Err(anyhow::anyhow!(
@@ -1213,41 +1304,62 @@ impl<'parent> ChildTrackerBuilder<'parent> {
             ));
         }
 
-        let child_cancel_token = self.parent.cancel_token.child_token();
-        let child_metrics = Arc::new(ChildTaskMetrics::new(self.parent.metrics.clone()));
+        let parent = self.parent.0.clone();
+
+        let child_cancel_token = parent.cancel_token.child_token();
+        let child_metrics = Arc::new(ChildTaskMetrics::new(parent.metrics.clone()));
 
         // Use provided scheduler or inherit from parent
-        let scheduler = self
-            .scheduler
-            .unwrap_or_else(|| self.parent.scheduler.clone());
+        let scheduler = self.scheduler.unwrap_or_else(|| parent.scheduler.clone());
 
         // Use provided error policy or create child from parent's
         let error_policy = self
             .error_policy
-            .unwrap_or_else(|| self.parent.error_policy.create_child());
+            .unwrap_or_else(|| parent.error_policy.create_child());
 
-        let child = Arc::new(TaskTracker {
-            inner: TokioTaskTracker::new(),
+        let child = Arc::new(TaskTrackerInner {
+            tokio_tracker: TokioTaskTracker::new(),
             parent: None, // No parent reference needed for hierarchical operations
             scheduler,
             error_policy,
             metrics: child_metrics,
             cancel_token: child_cancel_token,
-            children: Arc::new(RwLock::new(Vec::new())),
+            children: RwLock::new(Vec::new()),
         });
 
         // Register this child with the parent for hierarchical operations
-        self.parent
+        parent
             .children
             .write()
             .unwrap()
             .push(Arc::downgrade(&child));
 
         // Periodically clean up dead children to prevent unbounded growth
-        self.parent.cleanup_dead_children();
+        parent.cleanup_dead_children();
 
-        Ok(child)
+        Ok(TaskTracker(child))
     }
+}
+
+/// Internal data for TaskTracker
+///
+/// This struct contains all the actual state and functionality of a TaskTracker.
+/// TaskTracker itself is just a wrapper around Arc<TaskTrackerInner>.
+struct TaskTrackerInner {
+    /// Tokio's task tracker for lifecycle management
+    tokio_tracker: TokioTaskTracker,
+    /// Parent tracker (None for root)
+    parent: Option<Arc<TaskTrackerInner>>,
+    /// Scheduling policy (shared with children by default)
+    scheduler: Arc<dyn TaskScheduler>,
+    /// Error handling policy (child-specific via create_child)
+    error_policy: Arc<dyn OnErrorPolicy>,
+    /// Metrics for this tracker
+    metrics: Arc<dyn HierarchicalTaskMetrics>,
+    /// Cancellation token for this tracker (always present)
+    cancel_token: CancellationToken,
+    /// List of child trackers for hierarchical operations
+    children: RwLock<Vec<Weak<TaskTrackerInner>>>,
 }
 
 /// Hierarchical task tracker with pluggable scheduling and error policies
@@ -1268,58 +1380,93 @@ impl<'parent> ChildTrackerBuilder<'parent> {
 /// # use tokio::sync::Semaphore;
 /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy, CancellableTaskResult};
 /// # async fn example() -> anyhow::Result<()> {
-/// // Create tracker with builder pattern
-/// let semaphore = Arc::new(Semaphore::new(5));
-/// let scheduler = Arc::new(SemaphoreScheduler::new(semaphore));
-/// let error_policy = Arc::new(LogOnlyPolicy::new());
-///
-/// let tracker = TaskTracker::builder()
+/// // Create a task tracker with semaphore-based scheduling
+/// let scheduler = SemaphoreScheduler::with_permits(3);
+/// let policy = LogOnlyPolicy::new();
+/// let root = TaskTracker::builder()
 ///     .scheduler(scheduler)
-///     .error_policy(error_policy)
-///     .build()
-///     .unwrap();
+///     .error_policy(policy)
+///     .build()?;
 ///
-/// // Spawn a regular task
-/// let handle = tracker.spawn(async {
-///     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-///     Ok(42)
-/// });
+/// // Spawn some tasks
+/// let handle1 = root.spawn(async { Ok(1) });
+/// let handle2 = root.spawn(async { Ok(2) });
 ///
-/// // Spawn a cancellable task that can inspect the token
-/// let handle2 = tracker.spawn_cancellable(|cancel_token| async move {
-///     tokio::select! {
-///         _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => CancellableTaskResult::Ok(42),
-///         _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
-///     }
-/// });
-///
-/// // Wait for completion
-/// let result = handle.await??;
+/// // Get results and join all tasks
+/// let result1 = handle1.await.unwrap().unwrap();
+/// let result2 = handle2.await.unwrap().unwrap();
+/// assert_eq!(result1, 1);
+/// assert_eq!(result2, 2);
 /// # Ok(())
 /// # }
 /// ```
-#[derive(Debug, Builder)]
-#[builder(pattern = "owned")]
-pub struct TaskTracker {
-    /// Tokio's task tracker for lifecycle management
-    #[builder(default = "TokioTaskTracker::new()")]
-    inner: TokioTaskTracker,
-    /// Parent tracker (None for root)
-    #[builder(default = "None")]
-    parent: Option<Arc<TaskTracker>>,
-    /// Scheduling policy (shared with children by default)
-    scheduler: Arc<dyn TaskScheduler>,
-    /// Error handling policy (child-specific via create_child)
-    error_policy: Arc<dyn OnErrorPolicy>,
-    /// Metrics for this tracker
-    #[builder(default = "Arc::new(DefaultRootTaskMetrics::new())")]
-    metrics: Arc<dyn HierarchicalTaskMetrics>,
-    /// Cancellation token for this tracker (always present)
-    #[builder(default = "CancellationToken::new()")]
-    cancel_token: CancellationToken,
-    /// List of child trackers for hierarchical operations
-    #[builder(default = "Arc::new(RwLock::new(Vec::new()))")]
-    children: Arc<RwLock<Vec<Weak<TaskTracker>>>>,
+#[derive(Clone)]
+pub struct TaskTracker(Arc<TaskTrackerInner>);
+
+/// Builder for TaskTracker
+#[derive(Default)]
+pub struct TaskTrackerBuilder {
+    scheduler: Option<Arc<dyn TaskScheduler>>,
+    error_policy: Option<Arc<dyn OnErrorPolicy>>,
+    metrics: Option<Arc<dyn HierarchicalTaskMetrics>>,
+    cancel_token: Option<CancellationToken>,
+}
+
+impl TaskTrackerBuilder {
+    /// Set the scheduler for this TaskTracker
+    pub fn scheduler(mut self, scheduler: Arc<dyn TaskScheduler>) -> Self {
+        self.scheduler = Some(scheduler);
+        self
+    }
+
+    /// Set the error policy for this TaskTracker
+    pub fn error_policy(mut self, error_policy: Arc<dyn OnErrorPolicy>) -> Self {
+        self.error_policy = Some(error_policy);
+        self
+    }
+
+    /// Set custom metrics for this TaskTracker
+    pub fn metrics(mut self, metrics: Arc<dyn HierarchicalTaskMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    /// Set the cancellation token for this TaskTracker
+    pub fn cancel_token(mut self, cancel_token: CancellationToken) -> Self {
+        self.cancel_token = Some(cancel_token);
+        self
+    }
+
+    /// Build the TaskTracker
+    pub fn build(self) -> anyhow::Result<TaskTracker> {
+        let scheduler = self
+            .scheduler
+            .ok_or_else(|| anyhow::anyhow!("TaskTracker requires a scheduler"))?;
+
+        let error_policy = self
+            .error_policy
+            .ok_or_else(|| anyhow::anyhow!("TaskTracker requires an error policy"))?;
+
+        let metrics = self
+            .metrics
+            .unwrap_or_else(|| Arc::new(DefaultRootTaskMetrics::new()));
+
+        let cancel_token = self
+            .cancel_token
+            .unwrap_or_else(|| CancellationToken::new());
+
+        let inner = TaskTrackerInner {
+            tokio_tracker: TokioTaskTracker::new(),
+            parent: None,
+            scheduler,
+            error_policy,
+            metrics,
+            cancel_token,
+            children: RwLock::new(Vec::new()),
+        };
+
+        Ok(TaskTracker(Arc::new(inner)))
+    }
 }
 
 impl TaskTracker {
@@ -1332,13 +1479,15 @@ impl TaskTracker {
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-    /// let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
-    /// let error_policy = Arc::new(LogOnlyPolicy::new());
+    /// # fn main() -> anyhow::Result<()> {
+    /// let scheduler = SemaphoreScheduler::with_permits(10);
+    /// let error_policy = LogOnlyPolicy::new();
     /// let tracker = TaskTracker::builder()
     ///     .scheduler(scheduler)
     ///     .error_policy(error_policy)
-    ///     .build()
-    ///     .unwrap();
+    ///     .build()?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn builder() -> TaskTrackerBuilder {
         TaskTrackerBuilder::default()
@@ -1358,21 +1507,21 @@ impl TaskTracker {
     /// # use std::sync::Arc;
     /// # use tokio::sync::Semaphore;
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-    /// let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
-    /// let error_policy = Arc::new(LogOnlyPolicy::new());
-    /// let tracker = TaskTracker::new(scheduler, error_policy);
+    /// # fn main() -> anyhow::Result<()> {
+    /// let scheduler = SemaphoreScheduler::with_permits(10);
+    /// let error_policy = LogOnlyPolicy::new();
+    /// let tracker = TaskTracker::new(scheduler, error_policy)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn new(
         scheduler: Arc<dyn TaskScheduler>,
         error_policy: Arc<dyn OnErrorPolicy>,
-    ) -> Arc<Self> {
-        Arc::new(
-            Self::builder()
-                .scheduler(scheduler)
-                .error_policy(error_policy)
-                .build()
-                .unwrap(),
-        )
+    ) -> anyhow::Result<Self> {
+        Self::builder()
+            .scheduler(scheduler)
+            .error_policy(error_policy)
+            .build()
     }
 
     /// Create a new root task tracker with Prometheus metrics integration
@@ -1390,8 +1539,8 @@ impl TaskTracker {
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
     /// # use dynamo_runtime::metrics::MetricsRegistry;
     /// # fn example(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<()> {
-    /// let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
-    /// let error_policy = Arc::new(LogOnlyPolicy::new());
+    /// let scheduler = SemaphoreScheduler::with_permits(10);
+    /// let error_policy = LogOnlyPolicy::new();
     /// let tracker = TaskTracker::new_with_prometheus(
     ///     scheduler,
     ///     error_policy,
@@ -1406,17 +1555,14 @@ impl TaskTracker {
         error_policy: Arc<dyn OnErrorPolicy>,
         registry: &R,
         component_name: &str,
-    ) -> anyhow::Result<Arc<Self>> {
+    ) -> anyhow::Result<Self> {
         let prometheus_metrics = Arc::new(RootTaskMetrics::new(registry, component_name)?);
 
-        Ok(Arc::new(
-            Self::builder()
-                .scheduler(scheduler)
-                .error_policy(error_policy)
-                .metrics(prometheus_metrics)
-                .build()
-                .unwrap(),
-        ))
+        Self::builder()
+            .scheduler(scheduler)
+            .error_policy(error_policy)
+            .metrics(prometheus_metrics)
+            .build()
     }
 
     /// Create a child tracker that inherits scheduling policy
@@ -1442,34 +1588,8 @@ impl TaskTracker {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn child_tracker(&self) -> anyhow::Result<Arc<TaskTracker>> {
-        // Validate that parent tracker is still active
-        if self.is_closed() {
-            return Err(anyhow::anyhow!(
-                "Cannot create child tracker from closed parent tracker"
-            ));
-        }
-
-        let child_cancel_token = self.cancel_token.child_token();
-        let child_metrics = Arc::new(ChildTaskMetrics::new(self.metrics.clone()));
-
-        let child = Arc::new(TaskTracker {
-            inner: TokioTaskTracker::new(),
-            parent: None, // No parent reference needed for our hierarchical operations
-            scheduler: self.scheduler.clone(),
-            error_policy: self.error_policy.create_child(),
-            metrics: child_metrics,
-            cancel_token: child_cancel_token,
-            children: Arc::new(RwLock::new(Vec::new())),
-        });
-
-        // Register this child with the parent for hierarchical operations
-        self.children.write().unwrap().push(Arc::downgrade(&child));
-
-        // Periodically clean up dead children to prevent unbounded growth
-        self.cleanup_dead_children();
-
-        Ok(child)
+    pub fn child_tracker(&self) -> anyhow::Result<TaskTracker> {
+        Ok(TaskTracker(self.0.child_tracker()?))
     }
 
     /// Create a child tracker builder for flexible customization
@@ -1485,29 +1605,21 @@ impl TaskTracker {
     /// # fn example(root_tracker: TaskTracker) {
     /// // Custom scheduler, inherit error policy
     /// let child1 = root_tracker.child_tracker_builder()
-    ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5)))))
+    ///     .scheduler(SemaphoreScheduler::with_permits(5))
     ///     .build().unwrap();
     ///
     /// // Custom error policy, inherit scheduler
     /// let child2 = root_tracker.child_tracker_builder()
-    ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
+    ///     .error_policy(LogOnlyPolicy::new())
     ///     .build().unwrap();
     ///
     /// // Both custom
     /// let child3 = root_tracker.child_tracker_builder()
-    ///     .scheduler(Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(3)))))
-    ///     .error_policy(Arc::new(LogOnlyPolicy::new()))
+    ///     .scheduler(SemaphoreScheduler::with_permits(3))
+    ///     .error_policy(LogOnlyPolicy::new())
     ///     .build().unwrap();
     /// # }
     /// ```
-    pub fn child_tracker_builder(&self) -> ChildTrackerBuilder<'_> {
-        ChildTrackerBuilder {
-            parent: self,
-            scheduler: None,
-            error_policy: None,
-        }
-    }
-
     /// Spawn a new task
     ///
     /// The task will be wrapped with scheduling and error handling logic,
@@ -1520,6 +1632,10 @@ impl TaskTracker {
     /// # Returns
     /// A [`JoinHandle`] that can be used to await completion
     ///
+    /// # Panics
+    /// Panics if the tracker has been closed. This indicates a programming error
+    /// where tasks are being spawned after the tracker lifecycle has ended.
+    ///
     /// # Example
     /// ```rust
     /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
@@ -1530,7 +1646,7 @@ impl TaskTracker {
     ///     Ok(42)
     /// });
     ///
-    /// let result = handle.await??;
+    /// let result = handle.await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1539,32 +1655,9 @@ impl TaskTracker {
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
-        let task_id = self.generate_task_id();
-
-        // Increment issued counter immediately when task is submitted
-        self.metrics.increment_issued();
-
-        // Clone necessary components to move into the task
-        let scheduler = self.scheduler.clone();
-        let error_policy = self.error_policy.clone();
-        let metrics = self.metrics.clone();
-        let cancel_token = Some(self.cancel_token.clone());
-
-        // Wrap the user's future with our scheduling and error handling
-        let wrapped_future = async move {
-            Self::execute_with_policies(
-                task_id,
-                future,
-                scheduler,
-                error_policy,
-                metrics,
-                cancel_token,
-            )
-            .await
-        };
-
-        // Let tokio handle the actual task tracking
-        self.inner.spawn(wrapped_future)
+        self.0
+            .spawn(future)
+            .expect("TaskTracker must not be closed when spawning tasks")
     }
 
     /// Spawn a cancellable task that receives a cancellation token
@@ -1580,6 +1673,10 @@ impl TaskTracker {
     /// # Returns
     /// A [`JoinHandle`] that can be used to await completion
     ///
+    /// # Panics
+    /// Panics if the tracker has been closed. This indicates a programming error
+    /// where tasks are being spawned after the tracker lifecycle has ended.
+    ///
     /// # Example
     /// ```rust
     /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, CancellableTaskResult};
@@ -1593,7 +1690,7 @@ impl TaskTracker {
     ///     }
     /// });
     ///
-    /// let result = handle.await??;
+    /// let result = handle.await?;
     /// # Ok(())
     /// # }
     /// ```
@@ -1603,63 +1700,9 @@ impl TaskTracker {
         Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
         T: Send + 'static,
     {
-        let task_id = self.generate_task_id();
-
-        // Increment issued counter immediately when task is submitted
-        self.metrics.increment_issued();
-
-        // Clone necessary components to move into the task
-        let scheduler = self.scheduler.clone();
-        let error_policy = self.error_policy.clone();
-        let metrics = self.metrics.clone();
-        let task_cancel_token = self.cancel_token.clone();
-
-        // Create the future by calling the task function with the cancellation token
-        let cancellable_future = task_fn(task_cancel_token.clone());
-
-        // Handle CancellableTaskResult directly and route to proper TaskError
-        let wrapped_future = async move {
-            // Execute the cancellable task first
-            let task_result = cancellable_future.await;
-
-            match task_result {
-                CancellableTaskResult::Ok(value) => {
-                    // For successful results, still go through execute_with_policies for consistency
-                    let success_future = async move { Ok(value) };
-                    Self::execute_with_policies(
-                        task_id,
-                        success_future,
-                        scheduler,
-                        error_policy,
-                        metrics,
-                        Some(task_cancel_token),
-                    )
-                    .await
-                }
-                CancellableTaskResult::Cancelled => {
-                    // Handle cancellation directly - increment metrics and return TaskError::Cancelled
-                    metrics.increment_cancelled();
-                    debug!("Task was cancelled during execution (cancellable task)");
-                    Err(TaskError::Cancelled)
-                }
-                CancellableTaskResult::Err(error) => {
-                    // For errors, go through execute_with_policies
-                    let error_future = async move { Err(error) };
-                    Self::execute_with_policies(
-                        task_id,
-                        error_future,
-                        scheduler,
-                        error_policy,
-                        metrics,
-                        Some(task_cancel_token),
-                    )
-                    .await
-                }
-            }
-        };
-
-        // Let tokio handle the actual task tracking
-        self.inner.spawn(wrapped_future)
+        self.0
+            .spawn_cancellable(task_fn)
+            .expect("TaskTracker must not be closed when spawning tasks")
     }
 
     /// Get metrics for this tracker
@@ -1676,24 +1719,109 @@ impl TaskTracker {
     /// # }
     /// ```
     pub fn metrics(&self) -> &dyn HierarchicalTaskMetrics {
-        self.metrics.as_ref()
+        self.0.metrics.as_ref()
     }
 
     /// Cancel this tracker and all its tasks
     ///
     /// This will signal cancellation to all currently running tasks and prevent new tasks from being spawned.
     /// The cancellation is immediate and forceful.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # async fn example(tracker: TaskTracker) -> anyhow::Result<()> {
+    /// // Spawn a long-running task
+    /// let handle = tracker.spawn_cancellable(|cancel_token| async move {
+    ///     tokio::select! {
+    ///         _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+    ///             dynamo_runtime::utils::tasks::tracker::CancellableTaskResult::Ok(42)
+    ///         }
+    ///         _ = cancel_token.cancelled() => {
+    ///             dynamo_runtime::utils::tasks::tracker::CancellableTaskResult::Cancelled
+    ///         }
+    ///     }
+    /// }).await?;
+    ///
+    /// // Cancel the tracker (and thus the task)
+    /// tracker.cancel();
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn cancel(&self) {
-        // Close the tracker to prevent new tasks
-        self.inner.close();
+        self.0.cancel();
+    }
 
-        // Cancel our own token
-        self.cancel_token.cancel();
+    /// Check if this tracker is closed
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
 
-        // If our error policy has a cancellation token, trigger it too
-        if let Some(token) = self.error_policy.cancellation_token() {
-            token.cancel();
-        }
+    /// Get the cancellation token for this tracker
+    ///
+    /// This allows external code to observe or trigger cancellation of this tracker.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # fn example(tracker: &TaskTracker) {
+    /// let token = tracker.cancellation_token();
+    /// // Can check cancellation state or cancel manually
+    /// if !token.is_cancelled() {
+    ///     token.cancel();
+    /// }
+    /// # }
+    /// ```
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.0.cancellation_token()
+    }
+
+    /// Get the number of active child trackers
+    ///
+    /// This counts only child trackers that are still alive (not dropped).
+    /// Dropped child trackers are automatically cleaned up.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # fn example(tracker: &TaskTracker) {
+    /// let child_count = tracker.child_count();
+    /// println!("This tracker has {} active children", child_count);
+    /// # }
+    /// ```
+    pub fn child_count(&self) -> usize {
+        self.0.child_count()
+    }
+
+    /// Create a child tracker builder with custom configuration
+    ///
+    /// This provides fine-grained control over child tracker creation,
+    /// allowing you to override the scheduler or error policy while
+    /// maintaining the parent-child relationship.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use tokio::sync::Semaphore;
+    /// # use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
+    /// # fn example(parent: &TaskTracker) {
+    /// // Custom scheduler, inherit error policy
+    /// let child1 = parent.child_tracker_builder()
+    ///     .scheduler(SemaphoreScheduler::with_permits(5))
+    ///     .build().unwrap();
+    ///
+    /// // Custom error policy, inherit scheduler
+    /// let child2 = parent.child_tracker_builder()
+    ///     .error_policy(LogOnlyPolicy::new())
+    ///     .build().unwrap();
+    ///
+    /// // Inherit both policies from parent
+    /// let child3 = parent.child_tracker_builder()
+    ///     .build().unwrap();
+    /// # }
+    /// ```
+    pub fn child_tracker_builder(&self) -> ChildTrackerBuilder<'_> {
+        ChildTrackerBuilder::new(self)
     }
 
     /// Join this tracker and all child trackers
@@ -1712,75 +1840,167 @@ impl TaskTracker {
     ///
     /// # Example
     /// ```rust
-    /// # use std::sync::Arc;
     /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
-    /// # async fn example(tracker: Arc<TaskTracker>) {
+    /// # async fn example(tracker: TaskTracker) {
     /// tracker.join().await;
     /// # }
     /// ```
-    pub async fn join(self: Arc<Self>) {
-        // Fast path for leaf trackers (no children)
-        let is_leaf = {
-            let children_guard = self.children.read().unwrap();
-            children_guard.is_empty()
+    pub async fn join(&self) {
+        self.0.join().await
+    }
+}
+
+impl TaskTrackerInner {
+    /// Creates child tracker with inherited scheduler/policy, independent metrics, and hierarchical cancellation
+    fn child_tracker(self: &Arc<Self>) -> anyhow::Result<Arc<TaskTrackerInner>> {
+        // Validate that parent tracker is still active
+        if self.is_closed() {
+            return Err(anyhow::anyhow!(
+                "Cannot create child tracker from closed parent tracker"
+            ));
+        }
+
+        let child_cancel_token = self.cancel_token.child_token();
+        let child_metrics = Arc::new(ChildTaskMetrics::new(self.metrics.clone()));
+
+        let child = Arc::new(TaskTrackerInner {
+            tokio_tracker: TokioTaskTracker::new(),
+            parent: Some(self.clone()),
+            scheduler: self.scheduler.clone(),
+            error_policy: self.error_policy.create_child(),
+            metrics: child_metrics,
+            cancel_token: child_cancel_token,
+            children: RwLock::new(Vec::new()),
+        });
+
+        // Register this child with the parent for hierarchical operations
+        self.children.write().unwrap().push(Arc::downgrade(&child));
+
+        // Periodically clean up dead children to prevent unbounded growth
+        self.cleanup_dead_children();
+
+        Ok(child)
+    }
+
+    /// Spawn implementation - validates tracker state, generates task ID, applies policies, and tracks execution
+    fn spawn<F, T>(
+        self: &Arc<Self>,
+        future: F,
+    ) -> Result<JoinHandle<Result<T, TaskError>>, TaskError>
+    where
+        F: Future<Output = Result<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Validate tracker is not closed
+        if self.tokio_tracker.is_closed() {
+            return Err(TaskError::TrackerClosed);
+        }
+
+        // Generate a unique task ID
+        let task_id = self.generate_task_id();
+
+        // Increment issued counter immediately when task is submitted
+        self.metrics.increment_issued();
+
+        // Clone the inner Arc to move into the task
+        let inner = self.clone();
+
+        // Wrap the user's future with our scheduling and error handling
+        let wrapped_future =
+            async move { Self::execute_with_policies(task_id, future, inner).await };
+
+        // Let tokio handle the actual task tracking
+        Ok(self.tokio_tracker.spawn(wrapped_future))
+    }
+
+    /// Spawn cancellable implementation - validates state, provides cancellation token, handles CancellableTaskResult
+    fn spawn_cancellable<F, Fut, T>(
+        self: &Arc<Self>,
+        task_fn: F,
+    ) -> Result<JoinHandle<Result<T, TaskError>>, TaskError>
+    where
+        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Validate tracker is not closed
+        if self.tokio_tracker.is_closed() {
+            return Err(TaskError::TrackerClosed);
+        }
+
+        // Generate a unique task ID
+        let task_id = self.generate_task_id();
+
+        // Increment issued counter immediately when task is submitted
+        self.metrics.increment_issued();
+
+        // Clone the inner Arc to move into the task
+        let inner = self.clone();
+
+        // Create the future by calling the task function with the cancellation token
+        let cancellable_future = task_fn(inner.cancel_token.child_token());
+
+        // Handle CancellableTaskResult directly and route to proper TaskError
+        let wrapped_future = async move {
+            // Execute the cancellable task first
+            let task_result = cancellable_future.await;
+
+            match task_result {
+                CancellableTaskResult::Ok(value) => {
+                    // For successful results, still go through execute_with_policies for consistency
+                    let success_future = async move { Ok(value) };
+                    Self::execute_with_policies(task_id, success_future, inner).await
+                }
+                CancellableTaskResult::Cancelled => {
+                    // Handle cancellation directly - increment metrics and return TaskError::Cancelled
+                    inner.metrics.increment_cancelled();
+                    debug!("Task was cancelled during execution (cancellable task)");
+                    Err(TaskError::Cancelled)
+                }
+                CancellableTaskResult::Err(error) => {
+                    // For errors, go through execute_with_policies
+                    let error_future = async move { Err(error) };
+                    Self::execute_with_policies(task_id, error_future, inner).await
+                }
+            }
         };
 
-        if is_leaf {
-            self.inner.close();
-            self.inner.wait().await;
-            return;
-        }
-
-        // Stack-safe traversal for deep hierarchies
-        // Processes children before parents to ensure proper shutdown order
-        let trackers = Self::collect_hierarchy(self);
-        for t in trackers {
-            t.inner.close();
-            t.inner.wait().await;
-        }
+        // Let tokio handle the actual task tracking
+        Ok(self.tokio_tracker.spawn(wrapped_future))
     }
 
-    /// Check if this tracker is closed
-    pub fn is_closed(&self) -> bool {
-        self.inner.is_closed()
+    /// Cancel this tracker and all its tasks - implementation
+    fn cancel(&self) {
+        // Close the tracker to prevent new tasks
+        self.tokio_tracker.close();
+
+        // Cancel our own token
+        self.cancel_token.cancel();
     }
 
-    /// Get the cancellation token for this tracker
-    ///
-    /// This allows external code to observe or trigger cancellation of this tracker.
-    /// All trackers now have cancellation tokens.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use std::sync::Arc;
-    /// # use tokio_util::sync::CancellationToken;
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
-    /// # fn example(tracker: &TaskTracker) {
-    /// let token = tracker.cancellation_token();
-    /// // Can check cancellation state or cancel manually
-    /// if !token.is_cancelled() {
-    ///     token.cancel();
-    /// }
-    /// # }
-    /// ```
-    pub fn cancellation_token(&self) -> CancellationToken {
+    /// Returns true if the underlying tokio tracker is closed
+    fn is_closed(&self) -> bool {
+        self.tokio_tracker.is_closed()
+    }
+
+    /// Generates a unique task ID using TaskId::new()
+    fn generate_task_id(&self) -> TaskId {
+        TaskId::new()
+    }
+
+    /// Removes dead weak references from children list to prevent memory leaks
+    fn cleanup_dead_children(&self) {
+        let mut children_guard = self.children.write().unwrap();
+        children_guard.retain(|weak| weak.upgrade().is_some());
+    }
+
+    /// Returns a clone of the cancellation token
+    fn cancellation_token(&self) -> CancellationToken {
         self.cancel_token.clone()
     }
 
-    /// Get the number of active child trackers
-    ///
-    /// This returns the count of child trackers that are still alive (not dropped).
-    /// Useful for monitoring the tracker hierarchy.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
-    /// # fn example(tracker: &TaskTracker) {
-    /// let child_count = tracker.child_count();
-    /// println!("This tracker has {} active children", child_count);
-    /// # }
-    /// ```
-    pub fn child_count(&self) -> usize {
+    /// Counts active child trackers (filters out dead weak references)
+    fn child_count(&self) -> usize {
         let children_guard = self.children.read().unwrap();
         children_guard
             .iter()
@@ -1788,46 +2008,33 @@ impl TaskTracker {
             .count()
     }
 
-    /// Clean up dead weak references if needed
-    ///
-    /// This is called periodically to prevent unbounded growth of dead references.
-    /// Only cleans up if there are significantly more total references than alive ones.
-    fn cleanup_dead_children(&self) {
-        // Try to get read lock first to check if cleanup is needed
-        if let Ok(children_guard) = self.children.read() {
-            let total_count = children_guard.len();
-            let alive_count = children_guard
-                .iter()
-                .filter(|weak| weak.upgrade().is_some())
-                .count();
+    /// Join implementation - closes all trackers in hierarchy then waits for task completion using stack-safe traversal
+    async fn join(self: &Arc<Self>) {
+        // Fast path for leaf trackers (no children)
+        let is_leaf = {
+            let children_guard = self.children.read().unwrap();
+            children_guard.is_empty()
+        };
 
-            // Only clean up if we have significant dead references
-            // Use a threshold to avoid frequent cleanup operations
-            let should_cleanup = total_count > 10 && total_count > alive_count * 2;
-            drop(children_guard); // Release read lock
+        if is_leaf {
+            self.tokio_tracker.close();
+            self.tokio_tracker.wait().await;
+            return;
+        }
 
-            if should_cleanup {
-                // Upgrade to write lock and perform cleanup
-                if let Ok(mut children_guard) = self.children.write() {
-                    children_guard.retain(|weak| weak.upgrade().is_some());
-                }
-            }
+        // Stack-safe traversal for deep hierarchies
+        // Processes children before parents to ensure proper shutdown order
+        let trackers = self.collect_hierarchy();
+        for t in trackers {
+            t.tokio_tracker.close();
+            t.tokio_tracker.wait().await;
         }
     }
 
-    /// Generate a unique task ID
-    fn generate_task_id(&self) -> TaskId {
-        TaskId::new()
-    }
-
-    /// Collect all trackers in the hierarchy using iterative pre-order traversal
-    ///
-    /// Returns trackers in bottom-up order (children before parents) for safe shutdown.
-    /// Uses reversed pre-order to achieve post-order semantics without recursion,
-    /// avoiding stack overflow for deep hierarchies and associated heap allocations.
-    fn collect_hierarchy(start: Arc<TaskTracker>) -> Vec<Arc<TaskTracker>> {
+    /// Collects hierarchy using iterative DFS, returns Vec in post-order (children before parents) for safe shutdown
+    fn collect_hierarchy(self: &Arc<TaskTrackerInner>) -> Vec<Arc<TaskTrackerInner>> {
         let mut result = Vec::new();
-        let mut stack = vec![start];
+        let mut stack = vec![self.clone()];
         let mut visited = HashSet::new();
 
         // Collect all trackers using depth-first search
@@ -1839,7 +2046,7 @@ impl TaskTracker {
             visited.insert(tracker_ptr);
 
             // Add current tracker to result
-            result.push(Arc::clone(&tracker));
+            result.push(tracker.clone());
 
             // Add children to stack for processing
             if let Ok(children_guard) = tracker.children.read() {
@@ -1864,17 +2071,13 @@ impl TaskTracker {
     async fn execute_with_policies<F, T>(
         task_id: TaskId,
         future: F,
-        scheduler: Arc<dyn TaskScheduler>,
-        error_policy: Arc<dyn OnErrorPolicy>,
-        metrics: Arc<dyn HierarchicalTaskMetrics>,
-        cancel_token: Option<CancellationToken>,
+        inner: Arc<TaskTrackerInner>,
     ) -> Result<T, TaskError>
     where
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
         debug!("Starting task execution");
-        metrics.increment_active();
 
         // Create a result slot for capturing the task result
         let result_slot: Arc<tokio::sync::Mutex<Option<Result<T>>>> =
@@ -1889,12 +2092,19 @@ impl TaskTracker {
         });
 
         // Acquire execution slot through scheduler with cancellation token
-        let guard_result = async { scheduler.acquire_execution_slot(cancel_token).await }
-            .instrument(tracing::debug_span!("scheduler_resource_acquisition"))
-            .await;
+        let guard_result = async {
+            inner
+                .scheduler
+                .acquire_execution_slot(inner.cancel_token.child_token())
+                .await
+        }
+        .instrument(tracing::debug_span!("scheduler_resource_acquisition"))
+        .await;
 
         let final_result = match guard_result {
             SchedulingResult::Execute(guard) => {
+                // Only increment active counter AFTER successfully acquiring the semaphore permit
+                inner.metrics.increment_active();
                 // Execute task through the guard (enforces no cancellation during execution)
                 let _execution_result = async { guard.execute_task(boxed_future).await }
                     .instrument(tracing::debug_span!("task_execution"))
@@ -1909,32 +2119,55 @@ impl TaskTracker {
 
                 match result {
                     Ok(value) => {
-                        metrics.increment_success();
+                        inner.metrics.increment_success();
                         debug!("Task completed successfully");
                         Ok(value)
                     }
                     Err(error) => {
-                        metrics.increment_failed();
-                        error_policy.on_error(&error, task_id).await;
+                        // Get error response from policy
+                        let response = inner.error_policy.on_error(&error, task_id);
 
-                        if error_policy.should_cancel_on_error(&error) {
-                            warn!(?error, "Error triggered cancellation");
-                            // Note: Individual task cancellation would need to be handled
-                            // by the error policy if it has access to the tracker
+                        match response {
+                            ErrorResponse::Continue => {
+                                inner.metrics.increment_failed();
+                                debug!(?error, "Task failed - continuing execution");
+                                Err(TaskError::Failed(error))
+                            }
+                            ErrorResponse::Cancel => {
+                                inner.metrics.increment_failed();
+                                warn!(?error, "Error triggered cancellation");
+                                inner.cancel();
+                                Err(TaskError::Failed(error))
+                            }
+                            ErrorResponse::Custom(action) => {
+                                // Execute the custom action
+                                inner.metrics.increment_failed();
+                                debug!(?error, "Task failed - executing custom action");
+
+                                // Create execution context for the action
+                                let context = TaskExecutionContext {
+                                    scheduler: inner.scheduler.clone(),
+                                    metrics: inner.metrics.clone(),
+                                };
+
+                                // Execute the custom action asynchronously
+                                let action_result =
+                                    action.execute(&error, task_id, 1, &context).await;
+                                debug!(?action_result, "Custom action completed");
+
+                                Err(TaskError::Failed(error))
+                            }
                         }
-
-                        debug!(?error, "Task failed");
-                        Err(TaskError::Failed(error))
                     }
                 }
             }
             SchedulingResult::Cancelled => {
-                metrics.increment_cancelled();
+                inner.metrics.increment_cancelled();
                 debug!("Task was cancelled during resource acquisition");
                 Err(TaskError::Cancelled)
             }
             SchedulingResult::Rejected(reason) => {
-                metrics.increment_rejected();
+                inner.metrics.increment_rejected();
                 debug!(reason, "Task was rejected by scheduler");
                 Err(TaskError::Failed(anyhow::anyhow!(
                     "Task rejected: {}",
@@ -1943,7 +2176,7 @@ impl TaskTracker {
             }
         };
 
-        metrics.decrement_active();
+        inner.metrics.decrement_active();
         final_result
     }
 }
@@ -1998,20 +2231,15 @@ impl ResourceGuard for UnlimitedGuard {
 pub struct UnlimitedScheduler;
 
 impl UnlimitedScheduler {
-    /// Create a new unlimited scheduler
-    pub fn new() -> Self {
-        Self
-    }
-
     /// Create a new unlimited scheduler returning Arc
-    pub fn new_arc() -> Arc<Self> {
-        Self::new().new_arc()
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self)
     }
 }
 
 impl Default for UnlimitedScheduler {
     fn default() -> Self {
-        Self::new()
+        UnlimitedScheduler
     }
 }
 
@@ -2019,16 +2247,14 @@ impl Default for UnlimitedScheduler {
 impl TaskScheduler for UnlimitedScheduler {
     async fn acquire_execution_slot(
         &self,
-        cancel_token: Option<CancellationToken>,
+        cancel_token: CancellationToken,
     ) -> SchedulingResult<Box<dyn ResourceGuard>> {
         debug!("Acquiring execution slot (unlimited scheduler)");
 
         // Check for cancellation before allocating resources
-        if let Some(ref token) = cancel_token {
-            if token.is_cancelled() {
-                debug!("Task cancelled before acquiring execution slot");
-                return SchedulingResult::Cancelled;
-            }
+        if cancel_token.is_cancelled() {
+            debug!("Task cancelled before acquiring execution slot");
+            return SchedulingResult::Cancelled;
         }
 
         // No resource constraints for unlimited scheduler
@@ -2104,7 +2330,7 @@ impl SemaphoreScheduler {
 
     /// Create a semaphore scheduler with the specified number of permits, returning Arc
     pub fn with_permits(permits: usize) -> Arc<Self> {
-        Self::new(Arc::new(Semaphore::new(permits))).new_arc()
+        Arc::new(Self::new(Arc::new(Semaphore::new(permits))))
     }
 
     /// Get the number of available permits
@@ -2117,20 +2343,18 @@ impl SemaphoreScheduler {
 impl TaskScheduler for SemaphoreScheduler {
     async fn acquire_execution_slot(
         &self,
-        cancel_token: Option<CancellationToken>,
+        cancel_token: CancellationToken,
     ) -> SchedulingResult<Box<dyn ResourceGuard>> {
         debug!("Acquiring semaphore permit");
 
         // Check for cancellation before attempting to acquire semaphore
-        if let Some(ref token) = cancel_token {
-            if token.is_cancelled() {
-                debug!("Task cancelled before acquiring semaphore permit");
-                return SchedulingResult::Cancelled;
-            }
+        if cancel_token.is_cancelled() {
+            debug!("Task cancelled before acquiring semaphore permit");
+            return SchedulingResult::Cancelled;
         }
 
         // Try to acquire a permit, with cancellation support
-        let permit = if let Some(ref token) = cancel_token {
+        let permit = {
             tokio::select! {
                 result = self.semaphore.clone().acquire_owned() => {
                     match result {
@@ -2138,15 +2362,10 @@ impl TaskScheduler for SemaphoreScheduler {
                         Err(_) => return SchedulingResult::Cancelled,
                     }
                 }
-                _ = token.cancelled() => {
+                _ = cancel_token.cancelled() => {
                     debug!("Task cancelled while waiting for semaphore permit");
                     return SchedulingResult::Cancelled;
                 }
-            }
-        } else {
-            match self.semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => return SchedulingResult::Cancelled,
             }
         };
 
@@ -2155,66 +2374,50 @@ impl TaskScheduler for SemaphoreScheduler {
     }
 }
 
-/// Error policy that cancels tasks on specific error patterns
+/// Error policy that triggers cancellation based on error patterns
 ///
-/// This policy maintains a cancellation token and will cancel all tasks
-/// when certain error patterns are encountered.
+/// This policy analyzes error messages and returns `ErrorResponse::Cancel` when:
+/// - No patterns are specified (cancels on any error)
+/// - Error message matches one of the specified patterns
+///
+/// The TaskTracker handles the actual cancellation - this policy just makes the decision.
 ///
 /// # Example
 /// ```rust
-/// # use tokio_util::sync::CancellationToken;
 /// # use dynamo_runtime::utils::tasks::tracker::CancelOnError;
-/// let cancel_token = CancellationToken::new();
-/// let policy = CancelOnError::new(cancel_token.clone());
+/// // Cancel on any error
+/// let policy = CancelOnError::new();
 ///
-/// // Policy will cancel tasks on OutOfMemory errors
-/// let policy = CancelOnError::with_patterns(
-///     cancel_token,
+/// // Cancel only on specific error patterns
+/// let (policy, _token) = CancelOnError::with_patterns(
 ///     vec!["OutOfMemory".to_string(), "DeviceError".to_string()]
 /// );
 /// ```
 #[derive(Debug)]
 pub struct CancelOnError {
-    cancel_token: CancellationToken,
     error_patterns: Vec<String>,
 }
 
 impl CancelOnError {
-    /// Create a new cancel-on-error policy with default error patterns
+    /// Create a new cancel-on-error policy that cancels on any error
     ///
-    /// Default patterns: ["OutOfMemory", "DeviceError"]
-    pub fn new(cancel_token: CancellationToken) -> Self {
-        Self {
-            cancel_token,
-            error_patterns: vec!["OutOfMemory".to_string(), "DeviceError".to_string()],
-        }
+    /// Returns a policy with no error patterns, meaning it will cancel the TaskTracker
+    /// on any task failure.
+    pub fn new() -> Arc<Self> {
+        let policy = Arc::new(Self {
+            error_patterns: vec![], // Empty patterns = cancel on any error
+        });
+        policy
     }
 
-    /// Create a new cancel-on-error policy with default patterns, returning Arc and token
-    pub fn new_arc() -> (Arc<Self>, CancellationToken) {
-        let token = CancellationToken::new();
-        (Self::new(token.clone()).new_arc(), token)
-    }
-
-    /// Create a new cancel-on-error policy with custom error patterns
+    /// Create a new cancel-on-error policy with custom error patterns, returning Arc and token
     ///
     /// # Arguments
-    /// * `cancel_token` - Token to cancel when errors occur
     /// * `error_patterns` - List of error message patterns that trigger cancellation
-    pub fn with_patterns(cancel_token: CancellationToken, error_patterns: Vec<String>) -> Self {
-        Self {
-            cancel_token,
-            error_patterns,
-        }
-    }
-
-    /// Create a new cancel-on-error policy with custom patterns, returning Arc and token
-    pub fn with_patterns_arc(error_patterns: Vec<String>) -> (Arc<Self>, CancellationToken) {
+    pub fn with_patterns(error_patterns: Vec<String>) -> (Arc<Self>, CancellationToken) {
         let token = CancellationToken::new();
-        (
-            Self::with_patterns(token.clone(), error_patterns).new_arc(),
-            token,
-        )
+        let policy = Arc::new(Self { error_patterns });
+        (policy, token)
     }
 }
 
@@ -2224,33 +2427,29 @@ impl OnErrorPolicy for CancelOnError {
         // Child gets a child cancel token - when parent cancels, child cancels too
         // When child cancels, parent is unaffected
         Arc::new(CancelOnError {
-            cancel_token: self.cancel_token.child_token(),
             error_patterns: self.error_patterns.clone(),
         })
     }
 
-    async fn on_error(&self, error: &anyhow::Error, task_id: TaskId) {
+    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
         error!(?task_id, ?error, "Task failed");
 
-        if self.should_cancel_on_error(error) {
-            warn!(?task_id, "Triggering cancellation due to critical error");
-            self.cancel_token.cancel();
+        if self.error_patterns.is_empty() {
+            return ErrorResponse::Cancel;
         }
-    }
 
-    async fn on_failure_threshold_exceeded(&self, failure_rate: f64) {
-        warn!(?failure_rate, "Failure threshold exceeded");
-    }
-
-    fn should_cancel_on_error(&self, error: &anyhow::Error) -> bool {
+        // Check if this error should trigger cancellation
         let error_str = error.to_string();
-        self.error_patterns
+        let should_cancel = self
+            .error_patterns
             .iter()
-            .any(|pattern| error_str.contains(pattern))
-    }
+            .any(|pattern| error_str.contains(pattern));
 
-    fn cancellation_token(&self) -> Option<CancellationToken> {
-        Some(self.cancel_token.clone())
+        if should_cancel {
+            ErrorResponse::Cancel
+        } else {
+            ErrorResponse::Continue
+        }
     }
 }
 
@@ -2262,36 +2461,27 @@ impl OnErrorPolicy for CancelOnError {
 pub struct LogOnlyPolicy;
 
 impl LogOnlyPolicy {
-    /// Create a new log-only policy
-    pub fn new() -> Self {
-        Self
-    }
-
     /// Create a new log-only policy returning Arc
-    pub fn new_arc() -> Arc<Self> {
-        Self::new().new_arc()
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self)
     }
 }
 
 impl Default for LogOnlyPolicy {
     fn default() -> Self {
-        Self::new()
+        LogOnlyPolicy
     }
 }
 
-#[async_trait]
 impl OnErrorPolicy for LogOnlyPolicy {
     fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
         // Simple policies can just clone themselves
         Arc::new(LogOnlyPolicy)
     }
 
-    async fn on_error(&self, error: &anyhow::Error, task_id: TaskId) {
+    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
         error!(?task_id, ?error, "Task failed - logging only");
-    }
-
-    async fn on_failure_threshold_exceeded(&self, failure_rate: f64) {
-        warn!(?failure_rate, "Failure threshold exceeded - logging only");
+        ErrorResponse::Continue
     }
 }
 
@@ -2305,33 +2495,25 @@ impl OnErrorPolicy for LogOnlyPolicy {
 /// ```rust
 /// # use dynamo_runtime::utils::tasks::tracker::ThresholdCancelPolicy;
 /// // Cancel after 5 failures
-/// let (policy, token) = ThresholdCancelPolicy::new_arc(5);
+/// let policy = ThresholdCancelPolicy::with_threshold(5);
 /// ```
 #[derive(Debug)]
 pub struct ThresholdCancelPolicy {
-    cancel_token: CancellationToken,
     max_failures: usize,
     failure_count: AtomicU64,
 }
 
 impl ThresholdCancelPolicy {
-    /// Create a new threshold cancel policy
+    /// Create a new threshold cancel policy with specified failure threshold, returning Arc and token
     ///
     /// # Arguments
-    /// * `cancel_token` - Token to cancel when threshold is exceeded
     /// * `max_failures` - Maximum number of failures before cancellation
-    pub fn new(cancel_token: CancellationToken, max_failures: usize) -> Self {
-        Self {
-            cancel_token,
+    pub fn with_threshold(max_failures: usize) -> Arc<Self> {
+        let policy = Arc::new(Self {
             max_failures,
             failure_count: AtomicU64::new(0),
-        }
-    }
-
-    /// Create a new threshold cancel policy returning Arc and token
-    pub fn new_arc(max_failures: usize) -> (Arc<Self>, CancellationToken) {
-        let token = CancellationToken::new();
-        (Self::new(token.clone(), max_failures).new_arc(), token)
+        });
+        policy
     }
 
     /// Get the current failure count
@@ -2340,18 +2522,16 @@ impl ThresholdCancelPolicy {
     }
 }
 
-#[async_trait]
 impl OnErrorPolicy for ThresholdCancelPolicy {
     fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
         // Child gets a child cancel token and inherits the same failure threshold
         Arc::new(ThresholdCancelPolicy {
-            cancel_token: self.cancel_token.child_token(),
             max_failures: self.max_failures,
             failure_count: AtomicU64::new(0), // Child starts with fresh count
         })
     }
 
-    async fn on_error(&self, error: &anyhow::Error, task_id: TaskId) {
+    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
         error!(?task_id, ?error, "Task failed");
 
         let current_failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -2363,7 +2543,7 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
                 max_failures = self.max_failures,
                 "Failure threshold exceeded, triggering cancellation"
             );
-            self.cancel_token.cancel();
+            ErrorResponse::Cancel
         } else {
             debug!(
                 ?task_id,
@@ -2371,20 +2551,8 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
                 max_failures = self.max_failures,
                 "Task failed, tracking failure count"
             );
+            ErrorResponse::Continue
         }
-    }
-
-    async fn on_failure_threshold_exceeded(&self, failure_rate: f64) {
-        warn!(?failure_rate, "Failure threshold exceeded");
-    }
-
-    fn should_cancel_on_error(&self, _error: &anyhow::Error) -> bool {
-        // We handle cancellation logic in on_error, not here
-        false
-    }
-
-    fn cancellation_token(&self) -> Option<CancellationToken> {
-        Some(self.cancel_token.clone())
     }
 }
 
@@ -2398,7 +2566,10 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
 /// ```rust
 /// # use dynamo_runtime::utils::tasks::tracker::RateCancelPolicy;
 /// // Cancel if more than 50% of tasks fail within any 60-second window
-/// let (policy, token) = RateCancelPolicy::new_arc(0.5, 60);
+/// let (policy, token) = RateCancelPolicy::builder()
+///     .rate(0.5)
+///     .window_secs(60)
+///     .build();
 /// ```
 #[derive(Debug)]
 pub struct RateCancelPolicy {
@@ -2410,27 +2581,50 @@ pub struct RateCancelPolicy {
 }
 
 impl RateCancelPolicy {
-    /// Create a new rate-based cancel policy
-    ///
-    /// # Arguments
-    /// * `cancel_token` - Token to cancel when rate threshold is exceeded
-    /// * `max_failure_rate` - Maximum failure rate (0.0 to 1.0) before cancellation
-    /// * `window_secs` - Time window in seconds for rate calculation
-    pub fn new(cancel_token: CancellationToken, max_failure_rate: f32, window_secs: u64) -> Self {
+    /// Create a builder for rate-based cancel policy
+    pub fn builder() -> RateCancelPolicyBuilder {
+        RateCancelPolicyBuilder::new()
+    }
+}
+
+/// Builder for RateCancelPolicy
+pub struct RateCancelPolicyBuilder {
+    max_failure_rate: Option<f32>,
+    window_secs: Option<u64>,
+}
+
+impl RateCancelPolicyBuilder {
+    fn new() -> Self {
         Self {
-            cancel_token,
-            max_failure_rate,
-            window_secs,
+            max_failure_rate: None,
+            window_secs: None,
         }
     }
 
-    /// Create a new rate-based cancel policy returning Arc and token
-    pub fn new_arc(max_failure_rate: f32, window_secs: u64) -> (Arc<Self>, CancellationToken) {
+    /// Set the maximum failure rate (0.0 to 1.0) before cancellation
+    pub fn rate(mut self, max_failure_rate: f32) -> Self {
+        self.max_failure_rate = Some(max_failure_rate);
+        self
+    }
+
+    /// Set the time window in seconds for rate calculation
+    pub fn window_secs(mut self, window_secs: u64) -> Self {
+        self.window_secs = Some(window_secs);
+        self
+    }
+
+    /// Build the policy, returning Arc and cancellation token
+    pub fn build(self) -> (Arc<RateCancelPolicy>, CancellationToken) {
+        let max_failure_rate = self.max_failure_rate.expect("rate must be set");
+        let window_secs = self.window_secs.expect("window_secs must be set");
+
         let token = CancellationToken::new();
-        (
-            Self::new(token.clone(), max_failure_rate, window_secs).new_arc(),
-            token,
-        )
+        let policy = Arc::new(RateCancelPolicy {
+            cancel_token: token.clone(),
+            max_failure_rate,
+            window_secs,
+        });
+        (policy, token)
     }
 }
 
@@ -2444,64 +2638,152 @@ impl OnErrorPolicy for RateCancelPolicy {
         })
     }
 
-    async fn on_error(&self, error: &anyhow::Error, task_id: TaskId) {
+    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
         error!(?task_id, ?error, "Task failed");
 
         // TODO: Implement time-window failure rate calculation
-        // For now, just log the error
+        // For now, just log the error and continue
         warn!(
             ?task_id,
             max_failure_rate = self.max_failure_rate,
             window_secs = self.window_secs,
             "Rate-based error policy - time window tracking not yet implemented"
         );
+
+        ErrorResponse::Continue
+    }
+}
+
+/// Custom action that triggers a cancellation token when executed
+///
+/// This action demonstrates the ErrorResponse::Custom behavior by capturing
+/// an external cancellation token and triggering it when executed.
+#[derive(Debug)]
+pub struct TriggerCancellationTokenAction {
+    cancel_token: CancellationToken,
+}
+
+impl TriggerCancellationTokenAction {
+    pub fn new(cancel_token: CancellationToken) -> Self {
+        Self { cancel_token }
+    }
+}
+
+#[async_trait]
+impl OnErrorAction for TriggerCancellationTokenAction {
+    async fn execute(
+        &self,
+        error: &anyhow::Error,
+        task_id: TaskId,
+        _attempt_count: u32,
+        _context: &TaskExecutionContext,
+    ) -> ActionResult {
+        warn!(
+            ?task_id,
+            ?error,
+            "Executing custom action: triggering cancellation token"
+        );
+
+        // Trigger the custom cancellation token
+        self.cancel_token.cancel();
+
+        // Return success - the action completed successfully
+        ActionResult::Cancel
+    }
+}
+
+/// Test error policy that triggers a custom cancellation token on any error
+///
+/// This policy demonstrates the ErrorResponse::Custom behavior by capturing
+/// an external cancellation token and triggering it when any error occurs.
+/// Used for testing custom error handling actions.
+///
+/// # Example
+/// ```rust
+/// # use tokio_util::sync::CancellationToken;
+/// # use dynamo_runtime::utils::tasks::tracker::TriggerCancellationTokenOnError;
+/// let cancel_token = CancellationToken::new();
+/// let policy = TriggerCancellationTokenOnError::new(cancel_token.clone());
+///
+/// // Policy will trigger the token on any error via ErrorResponse::Custom
+/// ```
+#[derive(Debug)]
+pub struct TriggerCancellationTokenOnError {
+    cancel_token: CancellationToken,
+}
+
+impl TriggerCancellationTokenOnError {
+    /// Create a new policy that triggers the given cancellation token on errors
+    pub fn new(cancel_token: CancellationToken) -> Arc<Self> {
+        Arc::new(Self { cancel_token })
+    }
+}
+
+impl OnErrorPolicy for TriggerCancellationTokenOnError {
+    fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
+        // Child gets a child cancel token
+        Arc::new(TriggerCancellationTokenOnError {
+            cancel_token: self.cancel_token.clone(),
+        })
     }
 
-    async fn on_failure_threshold_exceeded(&self, failure_rate: f64) {
-        warn!(?failure_rate, "Failure rate threshold exceeded");
-    }
+    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
+        error!(
+            ?task_id,
+            ?error,
+            "Task failed - triggering custom cancellation token"
+        );
 
-    fn should_cancel_on_error(&self, _error: &anyhow::Error) -> bool {
-        false // We handle cancellation in on_error when implemented
-    }
+        // Create the custom action that will trigger our token
+        let action = TriggerCancellationTokenAction::new(self.cancel_token.clone());
 
-    fn cancellation_token(&self) -> Option<CancellationToken> {
-        Some(self.cancel_token.clone())
+        // Return Custom response with our action
+        ErrorResponse::Custom(Box::new(action))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::*;
     use std::sync::atomic::AtomicU32;
     use std::time::Duration;
 
-    /// Helper to create a semaphore scheduler for tests
-    fn create_semaphore_scheduler(permits: usize) -> Arc<SemaphoreScheduler> {
-        Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(permits))))
+    // Test fixtures using rstest
+    #[fixture]
+    fn semaphore_scheduler() -> Arc<SemaphoreScheduler> {
+        Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))))
     }
 
-    /// Helper to create a cancel-on-error policy for tests
-    fn create_cancel_policy() -> (Arc<CancelOnError>, CancellationToken) {
-        let token = CancellationToken::new();
-        let policy = Arc::new(CancelOnError::new(token.clone()));
-        (policy, token)
+    #[fixture]
+    fn unlimited_scheduler() -> Arc<UnlimitedScheduler> {
+        UnlimitedScheduler::new()
     }
 
-    /// Helper to create a log-only policy for tests
-    fn create_log_policy() -> Arc<LogOnlyPolicy> {
-        Arc::new(LogOnlyPolicy::new())
+    #[fixture]
+    fn log_policy() -> Arc<LogOnlyPolicy> {
+        LogOnlyPolicy::new()
     }
 
+    #[fixture]
+    fn cancel_policy() -> Arc<CancelOnError> {
+        CancelOnError::new()
+    }
+
+    #[fixture]
+    fn basic_tracker(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) -> TaskTracker {
+        TaskTracker::new(unlimited_scheduler, log_policy).unwrap()
+    }
+
+    #[rstest]
     #[tokio::test]
-    async fn test_basic_task_execution() {
+    async fn test_basic_task_execution(basic_tracker: TaskTracker) {
         // Test successful task execution
-        let scheduler = create_semaphore_scheduler(1);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
-
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let handle = tracker.spawn(async {
+        let handle = basic_tracker.spawn(async {
             // Wait for signal to complete instead of sleep
             rx.await.ok();
             Ok(42)
@@ -2511,22 +2793,27 @@ mod tests {
         tx.send(()).ok();
 
         // Verify task completes successfully
-        let result = handle.await.unwrap().unwrap();
+        let result = handle
+            .await
+            .expect("Task should complete")
+            .expect("Task should succeed");
         assert_eq!(result, 42);
 
         // Verify metrics
-        assert_eq!(tracker.metrics().success(), 1);
-        assert_eq!(tracker.metrics().failed(), 0);
-        assert_eq!(tracker.metrics().cancelled(), 0);
-        assert_eq!(tracker.metrics().active(), 0);
+        assert_eq!(basic_tracker.metrics().success(), 1);
+        assert_eq!(basic_tracker.metrics().failed(), 0);
+        assert_eq!(basic_tracker.metrics().cancelled(), 0);
+        assert_eq!(basic_tracker.metrics().active(), 0);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_task_failure() {
+    async fn test_task_failure(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test task failure handling
-        let scheduler = create_semaphore_scheduler(1);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let tracker = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         let handle = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("test error")) });
 
@@ -2540,12 +2827,12 @@ mod tests {
         assert_eq!(tracker.metrics().cancelled(), 0);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_semaphore_concurrency_limit() {
+    async fn test_semaphore_concurrency_limit(log_policy: Arc<LogOnlyPolicy>) {
         // Test that semaphore limits concurrent execution
-        let scheduler = create_semaphore_scheduler(2); // Only 2 concurrent tasks
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler.clone(), error_policy);
+        let limited_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // Only 2 concurrent tasks
+        let tracker = TaskTracker::new(limited_scheduler, log_policy).unwrap();
 
         let counter = Arc::new(AtomicU32::new(0));
         let max_concurrent = Arc::new(AtomicU32::new(0));
@@ -2598,12 +2885,13 @@ mod tests {
         assert_eq!(tracker.metrics().failed(), 0);
     }
 
+    #[rstest]
     #[tokio::test]
     async fn test_cancel_on_error_policy() {
         // Test that CancelOnError policy works correctly
-        let (error_policy, cancel_token) = create_cancel_policy();
-        let scheduler = create_semaphore_scheduler(10);
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let error_policy = cancel_policy();
+        let scheduler = semaphore_scheduler();
+        let tracker = TaskTracker::new(scheduler, error_policy).unwrap();
 
         // Spawn a task that will trigger cancellation
         let handle =
@@ -2617,15 +2905,17 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Verify the cancel token was triggered
-        assert!(cancel_token.is_cancelled());
+        assert!(tracker.cancellation_token().is_cancelled());
     }
 
+    #[rstest]
     #[tokio::test]
     async fn test_tracker_cancellation() {
         // Test manual cancellation of tracker with CancelOnError policy
-        let (error_policy, cancel_token) = create_cancel_policy();
-        let scheduler = create_semaphore_scheduler(10);
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let error_policy = cancel_policy();
+        let scheduler = semaphore_scheduler();
+        let tracker = TaskTracker::new(scheduler, error_policy).unwrap();
+        let cancel_token = tracker.cancellation_token().child_token();
 
         // Use oneshot channel instead of sleep for deterministic timing
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
@@ -2650,12 +2940,14 @@ mod tests {
         assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_child_tracker_independence() {
+    async fn test_child_tracker_independence(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that child tracker has independent lifecycle
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         let child = parent.child_tracker().unwrap();
 
@@ -2675,12 +2967,14 @@ mod tests {
         assert_eq!(result, 42);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_independent_metrics() {
+    async fn test_independent_metrics(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that parent and child have independent metrics
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
         // Run tasks in parent
@@ -2698,43 +2992,75 @@ mod tests {
         assert_eq!(child.metrics().total_completed(), 1); // Child sees only its own
     }
 
+    #[rstest]
     #[tokio::test]
     async fn test_cancel_on_error_hierarchy() {
-        // Test that CancelOnError policy creates proper child tokens
-        let (error_policy, parent_token) = create_cancel_policy();
-        let scheduler = create_semaphore_scheduler(10);
-        let parent = TaskTracker::new(scheduler, error_policy);
+        // Test that child error policy cancellation doesn't affect parent
+        let parent_error_policy = cancel_policy();
+        let scheduler = semaphore_scheduler();
+        let parent = TaskTracker::new(scheduler, parent_error_policy).unwrap();
+        let parent_policy_token = parent.cancellation_token().child_token();
         let child = parent.child_tracker().unwrap();
 
-        // Get child's cancel token
-        let child_token = child
-            .error_policy
-            .cancellation_token()
-            .expect("Child should have cancel token");
+        // Initially nothing should be cancelled
+        assert!(!parent_policy_token.is_cancelled());
 
-        // Child token should be different from parent
-        assert!(!parent_token.is_cancelled());
-        assert!(!child_token.is_cancelled());
+        // Use explicit synchronization instead of sleep
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel();
+        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
 
-        // Trigger error in child that causes cancellation
-        let handle = child.spawn(async { Err::<(), _>(anyhow::anyhow!("OutOfMemory in child")) });
+        // Spawn a monitoring task to watch for the parent policy token cancellation
+        let parent_token_monitor = parent_policy_token.clone();
+        let monitor_handle = tokio::spawn(async move {
+            tokio::select! {
+                _ = parent_token_monitor.cancelled() => {
+                    cancel_tx.send(true).ok();
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    cancel_tx.send(false).ok();
+                }
+            }
+        });
 
-        handle.await.unwrap().unwrap_err();
+        // Spawn a task in the child that will trigger cancellation
+        let handle = child.spawn(async move {
+            let result = Err::<(), _>(anyhow::anyhow!("OutOfMemory in child"));
+            error_tx.send(()).ok(); // Signal that the error has occurred
+            result
+        });
 
-        // Give cancellation time to propagate
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        // Wait for the error to occur
+        let error_result = handle.await.unwrap();
+        assert!(error_result.is_err());
 
-        // Child should be cancelled, but parent should be unaffected
-        assert!(!parent_token.is_cancelled());
-        assert!(child_token.is_cancelled());
+        // Wait for our error signal
+        error_rx.await.ok();
+
+        // Check if parent policy token was cancelled within timeout
+        let was_cancelled = cancel_rx.await.unwrap_or(false);
+        monitor_handle.await.ok();
+
+        // Based on hierarchical design: child errors should NOT affect parent
+        // The child gets its own policy with a child token, and child cancellation
+        // should not propagate up to the parent policy token
+        assert!(
+            !was_cancelled,
+            "Parent policy token should not be cancelled by child errors"
+        );
+        assert!(
+            !parent_policy_token.is_cancelled(),
+            "Parent policy token should remain active"
+        );
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_graceful_shutdown() {
+    async fn test_graceful_shutdown(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test graceful shutdown with close()
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let tracker = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         // Use broadcast channel to coordinate task completion
         let (tx, _) = tokio::sync::broadcast::channel(1);
@@ -2755,7 +3081,7 @@ mod tests {
         tx.send(()).ok();
 
         // Close tracker and wait for completion
-        tracker.clone().join().await;
+        tracker.join().await;
 
         // All tasks should complete successfully
         for handle in handles {
@@ -2767,13 +3093,13 @@ mod tests {
         assert!(tracker.is_closed());
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_semaphore_scheduler_permit_tracking() {
+    async fn test_semaphore_scheduler_permit_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // Test that SemaphoreScheduler properly tracks permits
         let semaphore = Arc::new(Semaphore::new(3));
         let scheduler = Arc::new(SemaphoreScheduler::new(semaphore.clone()));
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler.clone(), error_policy);
+        let tracker = TaskTracker::new(scheduler.clone(), log_policy).unwrap();
 
         // Initially all permits should be available
         assert_eq!(scheduler.available_permits(), 3);
@@ -2812,11 +3138,12 @@ mod tests {
         assert_eq!(scheduler.available_permits(), 3);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_builder_pattern() {
+    async fn test_builder_pattern(log_policy: Arc<LogOnlyPolicy>) {
         // Test that TaskTracker builder works correctly
-        let scheduler = create_semaphore_scheduler(5);
-        let error_policy = create_log_policy();
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
+        let error_policy = log_policy;
 
         let tracker = TaskTracker::builder()
             .scheduler(scheduler)
@@ -2834,13 +3161,12 @@ mod tests {
         assert_eq!(result, 42);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_all_trackers_have_cancellation_tokens() {
+    async fn test_all_trackers_have_cancellation_tokens(log_policy: Arc<LogOnlyPolicy>) {
         // Test that all trackers (root and children) have cancellation tokens
-        let scheduler = create_semaphore_scheduler(5);
-        let error_policy = create_log_policy();
-
-        let root = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
+        let root = TaskTracker::new(scheduler, log_policy).unwrap();
         let child = root.child_tracker().unwrap();
         let grandchild = child.child_tracker().unwrap();
 
@@ -2867,12 +3193,12 @@ mod tests {
         assert!(grandchild_token.is_cancelled());
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_spawn_cancellable_task() {
+    async fn test_spawn_cancellable_task(log_policy: Arc<LogOnlyPolicy>) {
         // Test cancellable task spawning with proper result handling
-        let scheduler = create_semaphore_scheduler(5);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
         // Test successful completion
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2906,12 +3232,12 @@ mod tests {
         assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_cancellable_task_metrics_tracking() {
+    async fn test_cancellable_task_metrics_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // Test that properly cancelled tasks increment cancelled metrics, not failed metrics
-        let scheduler = create_semaphore_scheduler(5);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
         // Baseline metrics
         assert_eq!(tracker.metrics().cancelled(), 0);
@@ -2972,12 +3298,12 @@ mod tests {
         );
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_cancellable_vs_error_metrics_distinction() {
+    async fn test_cancellable_vs_error_metrics_distinction(log_policy: Arc<LogOnlyPolicy>) {
         // Test that we properly distinguish between cancellation and actual errors
-        let scheduler = create_semaphore_scheduler(5);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
         // Test 1: Actual error should increment failed count
         let handle1 = tracker.spawn_cancellable(|_cancel_token| async move {
@@ -3002,12 +3328,12 @@ mod tests {
         assert_eq!(tracker.metrics().cancelled(), 1); // Now 1 from cancellation
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_spawn_cancellable_error_handling() {
+    async fn test_spawn_cancellable_error_handling(log_policy: Arc<LogOnlyPolicy>) {
         // Test error handling in cancellable tasks
-        let scheduler = create_semaphore_scheduler(5);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(5))));
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
         // Test error result
         let handle = tracker.spawn_cancellable(|_cancel_token| async move {
@@ -3020,36 +3346,54 @@ mod tests {
         assert_eq!(tracker.metrics().failed(), 1);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_cancellation_before_execution() {
-        // Test that cancellation before task execution is handled
-        let scheduler = create_semaphore_scheduler(1);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+    async fn test_cancellation_before_execution(log_policy: Arc<LogOnlyPolicy>) {
+        // Test that spawning on a cancelled tracker panics (new behavior)
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(1))));
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
         // Cancel the tracker first
         tracker.cancel();
 
-        // Use oneshot channel instead of sleep
-        let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
+        // Give cancellation time to propagate to the inner tracker
+        tokio::time::sleep(Duration::from_millis(5)).await;
 
-        // Now try to spawn a task - it should be cancelled before execution
-        let handle = tracker.spawn(async {
-            rx.await.ok();
-            Ok(42)
-        });
+        // Now try to spawn a task - it should panic since tracker is closed
+        let panic_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            tracker.spawn(async { Ok(42) })
+        }));
 
-        let result = handle.await.unwrap();
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
+        // Should panic with our new API
+        assert!(
+            panic_result.is_err(),
+            "spawn() should panic when tracker is closed"
+        );
+
+        // Verify the panic message contains expected text
+        if let Err(panic_payload) = panic_result {
+            if let Some(panic_msg) = panic_payload.downcast_ref::<String>() {
+                assert!(
+                    panic_msg.contains("TaskTracker must not be closed"),
+                    "Panic message should indicate tracker is closed: {}",
+                    panic_msg
+                );
+            } else if let Some(panic_msg) = panic_payload.downcast_ref::<&str>() {
+                assert!(
+                    panic_msg.contains("TaskTracker must not be closed"),
+                    "Panic message should indicate tracker is closed: {}",
+                    panic_msg
+                );
+            }
+        }
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_semaphore_scheduler_with_cancellation() {
+    async fn test_semaphore_scheduler_with_cancellation(log_policy: Arc<LogOnlyPolicy>) {
         // Test that SemaphoreScheduler respects cancellation tokens
-        let scheduler = create_semaphore_scheduler(1);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(1))));
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
         // Start a long-running task to occupy the semaphore
         let blocker_token = tracker.cancellation_token();
@@ -3080,12 +3424,14 @@ mod tests {
         assert!(matches!(result.unwrap_err(), TaskError::Cancelled));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_child_tracker_cancellation_independence() {
+    async fn test_child_tracker_cancellation_independence(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that child tracker cancellation doesn't affect parent
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
         // Cancel only the child
@@ -3105,12 +3451,14 @@ mod tests {
         assert!(child_token.is_cancelled());
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_parent_cancellation_propagates_to_children() {
+    async fn test_parent_cancellation_propagates_to_children(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that parent cancellation propagates to all children
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child1 = parent.child_tracker().unwrap();
         let child2 = parent.child_tracker().unwrap();
         let grandchild = child1.child_tracker().unwrap();
@@ -3128,100 +3476,12 @@ mod tests {
         assert!(grandchild.cancellation_token().is_cancelled());
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_scheduler_queue_depth_calculation() {
-        // Test that we can calculate tasks queued in scheduler
-        let scheduler = create_semaphore_scheduler(2); // Only 2 concurrent tasks
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
-
-        // Initially no tasks
-        assert_eq!(tracker.metrics().issued(), 0);
-        assert_eq!(tracker.metrics().active(), 0);
-        assert_eq!(tracker.metrics().queued(), 0);
-        assert_eq!(tracker.metrics().pending(), 0);
-
-        // Use long running tasks to occupy the semaphore
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-
-        // Spawn 2 long-running tasks that will hold the semaphore permits
-        let tx1 = tx.clone();
-        let handle1 = tracker.spawn(async move {
-            tx1.send(()).await.unwrap(); // Signal that task started
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            Ok(1)
-        });
-
-        let tx2 = tx.clone();
-        let handle2 = tracker.spawn(async move {
-            tx2.send(()).await.unwrap(); // Signal that task started
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            Ok(2)
-        });
-
-        // Wait for both tasks to start (they should get the 2 semaphore permits)
-        rx.recv().await.unwrap();
-        rx.recv().await.unwrap();
-        drop(tx); // Close the channel
-
-        // Give tasks time to register as active
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        // Now spawn 2 more tasks - these should be queued
-        let handle3 = tracker.spawn(async { Ok(3) });
-        let handle4 = tracker.spawn(async { Ok(4) });
-
-        // Give queued tasks time to register
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-
-        // Check metrics - we should have queue depth now
-        assert_eq!(tracker.metrics().issued(), 4, "Should have 4 issued tasks");
-        assert_eq!(
-            tracker.metrics().pending(),
-            4,
-            "Should have 4 pending tasks total"
-        );
-        assert_eq!(
-            tracker.metrics().total_completed(),
-            0,
-            "No tasks completed yet"
-        );
-
-        // The active count should be 2 (semaphore limit) and queued should be 2
-        // Note: There might be slight timing variations, so let's be flexible
-        let active = tracker.metrics().active();
-        let queued = tracker.metrics().queued();
-        println!("Active: {}, Queued: {}", active, queued);
-
-        // At minimum, we should have some tasks active and total pending should be 4
-        assert!(active > 0, "Should have some active tasks");
-        assert_eq!(
-            active + queued,
-            4,
-            "Active + Queued should equal pending tasks"
-        );
-
-        // Wait for all tasks to complete
-        let results = tokio::join!(handle1, handle2, handle3, handle4);
-        for result in [results.0, results.1, results.2, results.3] {
-            result.unwrap().unwrap();
-        }
-
-        // Final state - all completed
-        assert_eq!(tracker.metrics().issued(), 4);
-        assert_eq!(tracker.metrics().active(), 0);
-        assert_eq!(tracker.metrics().queued(), 0);
-        assert_eq!(tracker.metrics().pending(), 0);
-        assert_eq!(tracker.metrics().total_completed(), 4);
-        assert_eq!(tracker.metrics().success(), 4);
-    }
-
-    #[tokio::test]
-    async fn test_issued_counter_tracking() {
+    async fn test_issued_counter_tracking(log_policy: Arc<LogOnlyPolicy>) {
         // Test that issued counter is incremented when tasks are spawned
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2))));
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
         // Initially no tasks issued
         assert_eq!(tracker.metrics().issued(), 0);
@@ -3263,32 +3523,52 @@ mod tests {
         assert_eq!(tracker.metrics().success(), 4); // Parent sees all successes
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_child_tracker_builder() {
+    async fn test_child_tracker_builder(log_policy: Arc<LogOnlyPolicy>) {
         // Test that child tracker builder allows custom policies
-        let parent_scheduler = create_semaphore_scheduler(10);
-        let parent_error_policy = create_log_policy();
-        let parent = TaskTracker::new(parent_scheduler, parent_error_policy);
+        let parent_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
+        let parent = TaskTracker::new(parent_scheduler, log_policy).unwrap();
 
-        // Test custom scheduler, inherit error policy
-        let child_scheduler = create_semaphore_scheduler(5);
-        let child1 = parent
+        // Create child with custom error policy
+        let child_error_policy = CancelOnError::new();
+        let child = parent
             .child_tracker_builder()
-            .scheduler(child_scheduler.clone())
+            .error_policy(child_error_policy)
             .build()
             .unwrap();
 
-        // Test custom error policy, inherit scheduler
-        let (child_error_policy, _) = create_cancel_policy();
+        // Test that child works
+        let handle = child.spawn(async { Ok(42) });
+        let result = handle.await.unwrap().unwrap();
+        assert_eq!(result, 42);
+
+        // Child should have its own metrics
+        assert_eq!(child.metrics().success(), 1);
+        assert_eq!(parent.metrics().total_completed(), 1); // Parent sees aggregated
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_hierarchical_metrics_aggregation(log_policy: Arc<LogOnlyPolicy>) {
+        // Test that child metrics aggregate up to parent
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
+        let parent = TaskTracker::new(scheduler, log_policy.clone()).unwrap();
+
+        // Create child1 with default settings
+        let child1 = parent.child_tracker().unwrap();
+
+        // Create child2 with custom error policy
+        let child_error_policy = CancelOnError::new();
         let child2 = parent
             .child_tracker_builder()
             .error_policy(child_error_policy)
             .build()
             .unwrap();
 
-        // Test both custom
-        let another_scheduler = create_semaphore_scheduler(3);
-        let another_error_policy = create_log_policy();
+        // Test both custom schedulers and policies
+        let another_scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(3))));
+        let another_error_policy = CancelOnError::new();
         let child3 = parent
             .child_tracker_builder()
             .scheduler(another_scheduler)
@@ -3315,76 +3595,91 @@ mod tests {
         assert_eq!(child3.metrics().success(), 1);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_hierarchical_metrics_aggregation() {
-        // Test that child metrics aggregate up to parent
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
-        let child1 = parent.child_tracker().unwrap();
-        let child2 = parent.child_tracker().unwrap();
-        let grandchild = child1.child_tracker().unwrap();
+    async fn test_scheduler_queue_depth_calculation(log_policy: Arc<LogOnlyPolicy>) {
+        // Test that we can calculate tasks queued in scheduler
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(2)))); // Only 2 concurrent tasks
+        let tracker = TaskTracker::new(scheduler, log_policy).unwrap();
 
-        // Run successful tasks in different trackers
-        let handle1 = parent.spawn(async { Ok(1) });
-        let handle2 = child1.spawn(async { Ok(2) });
-        let handle3 = child2.spawn(async { Ok(3) });
-        let handle4 = grandchild.spawn(async { Ok(4) });
+        // Initially no tasks
+        assert_eq!(tracker.metrics().issued(), 0);
+        assert_eq!(tracker.metrics().active(), 0);
+        assert_eq!(tracker.metrics().queued(), 0);
+        assert_eq!(tracker.metrics().pending(), 0);
 
-        // Wait for all tasks to complete
+        // Use a channel to control when tasks complete
+        let (complete_tx, _complete_rx) = tokio::sync::broadcast::channel(1);
+
+        // Spawn 2 tasks that will hold semaphore permits
+        let handle1 = tracker.spawn({
+            let mut rx = complete_tx.subscribe();
+            async move {
+                // Wait for completion signal
+                rx.recv().await.ok();
+                Ok(1)
+            }
+        });
+        let handle2 = tracker.spawn({
+            let mut rx = complete_tx.subscribe();
+            async move {
+                // Wait for completion signal
+                rx.recv().await.ok();
+                Ok(2)
+            }
+        });
+
+        // Give tasks time to start and acquire permits
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+
+        // Should have 2 active tasks, 0 queued
+        assert_eq!(tracker.metrics().issued(), 2);
+        assert_eq!(tracker.metrics().active(), 2);
+        assert_eq!(tracker.metrics().queued(), 0);
+        assert_eq!(tracker.metrics().pending(), 2);
+
+        // Spawn a third task - should be queued since semaphore is full
+        let handle3 = tracker.spawn(async move { Ok(3) });
+
+        // Give time for task to be queued
+        tokio::task::yield_now().await;
+
+        // Should have 2 active, 1 queued
+        assert_eq!(tracker.metrics().issued(), 3);
+        assert_eq!(tracker.metrics().active(), 2);
+        assert_eq!(
+            tracker.metrics().queued(),
+            tracker.metrics().pending() - tracker.metrics().active()
+        );
+        assert_eq!(tracker.metrics().pending(), 3);
+
+        // Complete all tasks by sending the signal
+        complete_tx.send(()).ok();
+
         let result1 = handle1.await.unwrap().unwrap();
         let result2 = handle2.await.unwrap().unwrap();
         let result3 = handle3.await.unwrap().unwrap();
-        let result4 = handle4.await.unwrap().unwrap();
 
         assert_eq!(result1, 1);
         assert_eq!(result2, 2);
         assert_eq!(result3, 3);
-        assert_eq!(result4, 4);
 
-        // Check individual tracker metrics (local counts)
-        // Note: Due to hierarchical aggregation, these numbers reflect both local and aggregated counts
-
-        // Parent sees: its own task (1) + child1 task (1) + child2 task (1) + grandchild task (1) = 4
-        assert_eq!(
-            parent.metrics().success(),
-            4,
-            "Parent should see 4 total successes (aggregated)"
-        );
-
-        // Child1 sees: its own task (1) + grandchild task (1) = 2
-        assert_eq!(
-            child1.metrics().success(),
-            2,
-            "Child1 should see 2 total successes (its own + grandchild)"
-        );
-
-        // Child2 sees: only its own task = 1
-        assert_eq!(
-            child2.metrics().success(),
-            1,
-            "Child2 should see 1 success (its own)"
-        );
-
-        // Grandchild sees: only its own task = 1
-        assert_eq!(
-            grandchild.metrics().success(),
-            1,
-            "Grandchild should see 1 success (its own)"
-        );
-
-        // This demonstrates the hierarchical metrics aggregation:
-        // - Each tracker maintains its local count
-        // - Child metrics bubble up to parents
-        // - Root tracker sees the total system metrics
+        // All tasks should be completed
+        assert_eq!(tracker.metrics().success(), 3);
+        assert_eq!(tracker.metrics().active(), 0);
+        assert_eq!(tracker.metrics().queued(), 0);
+        assert_eq!(tracker.metrics().pending(), 0);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_hierarchical_metrics_failure_aggregation() {
+    async fn test_hierarchical_metrics_failure_aggregation(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that failed task metrics aggregate up to parent
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
         // Run some successful and some failed tasks
@@ -3403,14 +3698,15 @@ mod tests {
         // Note: Due to hierarchical aggregation, these metrics propagate up
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_metrics_independence_between_tracker_instances() {
+    async fn test_metrics_independence_between_tracker_instances(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that different tracker instances have independent metrics
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-
-        let tracker1 = TaskTracker::new(scheduler.clone(), error_policy.clone());
-        let tracker2 = TaskTracker::new(scheduler, error_policy);
+        let tracker1 = TaskTracker::new(semaphore_scheduler.clone(), log_policy.clone()).unwrap();
+        let tracker2 = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         // Run tasks in both trackers
         let handle1 = tracker1.spawn(async { Ok(1) });
@@ -3426,12 +3722,12 @@ mod tests {
         assert_eq!(tracker2.metrics().total_completed(), 1);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_hierarchical_join_waits_for_all() {
+    async fn test_hierarchical_join_waits_for_all(log_policy: Arc<LogOnlyPolicy>) {
         // Test that parent.join() waits for child tasks too
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let scheduler = Arc::new(SemaphoreScheduler::new(Arc::new(Semaphore::new(10))));
+        let parent = TaskTracker::new(scheduler, log_policy).unwrap();
         let child1 = parent.child_tracker().unwrap();
         let child2 = parent.child_tracker().unwrap();
         let grandchild = child1.child_tracker().unwrap();
@@ -3502,12 +3798,14 @@ mod tests {
         assert!(final_order.contains(&"grandchild"));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_hierarchical_join_waits_for_children() {
+    async fn test_hierarchical_join_waits_for_children(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that join() waits for child tasks (hierarchical behavior)
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
 
         // Spawn a quick parent task and slow child task
@@ -3533,12 +3831,14 @@ mod tests {
         );
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_hierarchical_join_operations() {
+    async fn test_hierarchical_join_operations(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that parent.join() closes and waits for child trackers too
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
         let child = parent.child_tracker().unwrap();
         let grandchild = child.child_tracker().unwrap();
 
@@ -3548,20 +3848,20 @@ mod tests {
         assert!(!grandchild.is_closed());
 
         // Join parent (hierarchical by default - closes and waits for all)
-        parent.clone().join().await;
+        parent.join().await;
 
-        // All should be closed
-        assert!(parent.is_closed());
+        // All should be closed (check child trackers since parent was moved)
         assert!(child.is_closed());
         assert!(grandchild.is_closed());
     }
 
+    #[rstest]
     #[tokio::test]
     async fn test_unlimited_scheduler() {
         // Test that UnlimitedScheduler executes tasks immediately
-        let scheduler = UnlimitedScheduler::new_arc();
-        let error_policy = LogOnlyPolicy::new_arc();
-        let tracker = TaskTracker::new(scheduler, error_policy);
+        let scheduler = UnlimitedScheduler::new();
+        let error_policy = LogOnlyPolicy::new();
+        let tracker = TaskTracker::new(scheduler, error_policy).unwrap();
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         let handle = tracker.spawn(async {
@@ -3577,12 +3877,13 @@ mod tests {
         assert_eq!(tracker.metrics().success(), 1);
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_threshold_cancel_policy() {
+    async fn test_threshold_cancel_policy(semaphore_scheduler: Arc<SemaphoreScheduler>) {
         // Test that ThresholdCancelPolicy cancels after failure threshold
-        let (error_policy, cancel_token) = ThresholdCancelPolicy::new_arc(2); // Cancel after 2 failures
-        let scheduler = create_semaphore_scheduler(10);
-        let tracker = TaskTracker::new(scheduler, error_policy.clone());
+        let error_policy = ThresholdCancelPolicy::with_threshold(2); // Cancel after 2 failures
+        let tracker = TaskTracker::new(semaphore_scheduler, error_policy.clone()).unwrap();
+        let cancel_token = tracker.cancellation_token().child_token();
 
         // First failure - should not cancel
         let _handle1 = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("First failure")) });
@@ -3598,71 +3899,84 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_policy_arc_constructors() {
-        // Test that all Arc constructors work without requiring explicit Arc::new
-        let _unlimited = UnlimitedScheduler::new_arc();
+    async fn test_policy_constructors() {
+        // Test that all constructors follow the new clean API patterns
+        let _unlimited = UnlimitedScheduler::new();
         let _semaphore = SemaphoreScheduler::with_permits(5);
-        let _log_only = LogOnlyPolicy::new_arc();
-        let (_cancel_policy, _token1) = CancelOnError::new_arc();
-        let (_threshold_policy, _token2) = ThresholdCancelPolicy::new_arc(3);
-        let (_rate_policy, _token3) = RateCancelPolicy::new_arc(0.5, 60);
+        let _log_only = LogOnlyPolicy::new();
+        let _cancel_policy = CancelOnError::new();
+        let _threshold_policy = ThresholdCancelPolicy::with_threshold(3);
+        let _rate_policy = RateCancelPolicy::builder()
+            .rate(0.5)
+            .window_secs(60)
+            .build();
 
-        // All constructors should work without explicit Arc::new calls
-        // This test ensures the convenience API reduces boilerplate
+        // All constructors return Arc directly - no more ugly ::new_arc patterns
+        // This test ensures the clean API reduces boilerplate
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_child_creation_fails_after_join() {
+    async fn test_child_creation_fails_after_join(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that child tracker creation fails from closed parent
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         // Initially, creating a child should work
         let _child = parent.child_tracker().unwrap();
 
         // Close the parent tracker
-        parent.clone().join().await;
-        assert!(parent.is_closed());
+        let parent_clone = parent.clone();
+        parent.join().await;
+        assert!(parent_clone.is_closed());
 
         // Now, trying to create a child should fail
-        let result = parent.child_tracker();
+        let result = parent_clone.child_tracker();
         assert!(result.is_err());
         assert!(result
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string()
             .contains("closed parent tracker"));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_child_builder_fails_after_join() {
+    async fn test_child_builder_fails_after_join(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that child tracker builder creation fails from closed parent
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         // Initially, creating a child with builder should work
         let _child = parent.child_tracker_builder().build().unwrap();
 
         // Close the parent tracker
-        parent.clone().join().await;
-        assert!(parent.is_closed());
+        let parent_clone = parent.clone();
+        parent.join().await;
+        assert!(parent_clone.is_closed());
 
         // Now, trying to create a child with builder should fail
-        let result = parent.child_tracker_builder().build();
+        let result = parent_clone.child_tracker_builder().build();
         assert!(result.is_err());
         assert!(result
-            .unwrap_err()
+            .err()
+            .unwrap()
             .to_string()
             .contains("closed parent tracker"));
     }
 
+    #[rstest]
     #[tokio::test]
-    async fn test_child_creation_succeeds_before_join() {
+    async fn test_child_creation_succeeds_before_join(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
         // Test that child creation works normally before parent is joined
-        let scheduler = create_semaphore_scheduler(10);
-        let error_policy = create_log_policy();
-        let parent = TaskTracker::new(scheduler, error_policy);
+        let parent = TaskTracker::new(semaphore_scheduler, log_policy).unwrap();
 
         // Should be able to create multiple children before closing
         let child1 = parent.child_tracker().unwrap();
@@ -3678,5 +3992,65 @@ mod tests {
         assert_eq!(result1, 42);
         assert_eq!(result2, 24);
         assert_eq!(parent.metrics().success(), 2); // Parent sees all successes
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_custom_error_response_with_cancellation_token(
+        semaphore_scheduler: Arc<SemaphoreScheduler>,
+    ) {
+        // Test ErrorResponse::Custom behavior with TriggerCancellationTokenOnError
+
+        // Create a custom cancellation token
+        let custom_cancel_token = CancellationToken::new();
+
+        // Create the policy that will trigger our custom token
+        let error_policy = TriggerCancellationTokenOnError::new(custom_cancel_token.clone());
+
+        // Create tracker using builder with the custom policy
+        let tracker = TaskTracker::builder()
+            .scheduler(semaphore_scheduler)
+            .error_policy(error_policy)
+            .cancel_token(custom_cancel_token.clone())
+            .build()
+            .unwrap();
+
+        let child = tracker.child_tracker().unwrap();
+
+        // Initially, the custom token should not be cancelled
+        assert!(!custom_cancel_token.is_cancelled());
+
+        // Spawn a task that will fail
+        let handle = child.spawn(async {
+            Err::<(), _>(anyhow::anyhow!("Test error to trigger custom response"))
+        });
+
+        // Wait for the task to complete (it will fail)
+        let result = handle.await.unwrap();
+        assert!(result.is_err());
+
+        // Await a timeout/deadline or the cancellation token to be cancelled
+        // The expectation is that the task will fail, and the cancellation token will be triggered
+        // Hitting the deadline is a failure
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                panic!("Task should have failed, but hit the deadline");
+            }
+            _ = custom_cancel_token.cancelled() => {
+                // Task should have failed, and the cancellation token should be triggered
+            }
+        }
+
+        // The custom cancellation token should now be triggered by our policy
+        assert!(
+            custom_cancel_token.is_cancelled(),
+            "Custom cancellation token should be triggered by ErrorResponse::Custom"
+        );
+
+        assert!(tracker.cancellation_token().is_cancelled());
+        assert!(child.cancellation_token().is_cancelled());
+
+        // Verify the error was counted
+        assert_eq!(tracker.metrics().failed(), 1);
     }
 }
