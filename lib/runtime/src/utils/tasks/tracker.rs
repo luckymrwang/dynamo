@@ -195,13 +195,20 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker as TokioTaskTracker;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, warn, Instrument};
 use uuid::Uuid;
 
 /// Common scheduling policies for task execution
 ///
 /// These enums provide convenient access to built-in scheduling policies
 /// without requiring manual construction of policy objects.
+///
+/// ## Cancellation Semantics
+///
+/// All schedulers follow the same cancellation behavior:
+/// - Respect cancellation tokens before resource allocation (permits, etc.)
+/// - Once task execution begins, always await completion
+/// - Let tasks handle their own cancellation internally
 #[derive(Debug, Clone)]
 pub enum SchedulingPolicy {
     /// No concurrency limits - execute all tasks immediately
@@ -430,92 +437,67 @@ pub enum SchedulingResult<T> {
     Rejected(String),
 }
 
-/// Trait for implementing task scheduling policies
+/// Resource guard that manages task execution
 ///
-/// Implementors control when and how tasks are executed, including
-/// concurrency limits, resource management, and scheduling decisions.
+/// This trait enforces proper cancellation semantics by separating resource
+/// management from task execution. Once a guard is acquired, task execution
+/// must always run to completion.
 #[async_trait]
-pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
-    /// Schedule a task for execution
+pub trait ResourceGuard: Send {
+    /// Execute a task to completion
     ///
-    /// This method wraps the provided future with scheduling logic
-    /// and returns the result of execution or a scheduling decision.
+    /// This method MUST always await the task completion. No cancellation
+    /// token is provided to prevent interrupting task execution.
+    ///
+    /// Tasks that support cancellation will handle it internally and return
+    /// appropriately when their cancellation token is triggered.
     ///
     /// # Arguments
-    /// * `task` - The task future to execute
-    /// * `cancel_token` - Optional cancellation token to respect during scheduling
-    async fn schedule(
-        &self,
+    /// * `task` - The task future to execute (may or may not support cancellation)
+    async fn execute_task(
+        self: Box<Self>,
         task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
-        cancel_token: Option<CancellationToken>,
-    ) -> SchedulingResult<Result<()>>;
+    ) -> Result<()>;
 }
 
-/// Unlimited task scheduler that executes all tasks immediately
+/// Trait for implementing task scheduling policies
 ///
-/// This scheduler provides no concurrency limits and executes all submitted tasks
-/// immediately. Useful for testing, high-throughput scenarios, or when external
-/// systems provide the concurrency control.
+/// This trait enforces proper cancellation semantics by splitting resource
+/// acquisition (which can be cancelled) from task execution (which cannot).
 ///
-/// # Example
-/// ```rust
-/// # use dynamo_runtime::utils::tasks::tracker::UnlimitedScheduler;
-/// let scheduler = UnlimitedScheduler::new();
-/// ```
-#[derive(Debug)]
-pub struct UnlimitedScheduler;
-
-impl UnlimitedScheduler {
-    /// Create a new unlimited scheduler
-    pub fn new() -> Self {
-        Self
-    }
-
-    /// Create a new unlimited scheduler returning Arc
-    pub fn new_arc() -> Arc<Self> {
-        Self::new().new_arc()
-    }
-}
-
-impl Default for UnlimitedScheduler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-// Blanket implementation for all schedulers
-impl ArcPolicy for UnlimitedScheduler {}
-impl ArcPolicy for SemaphoreScheduler {}
-
-// Blanket implementation for all error policies
-impl ArcPolicy for LogOnlyPolicy {}
-impl ArcPolicy for CancelOnError {}
-impl ArcPolicy for ThresholdCancelPolicy {}
-impl ArcPolicy for RateCancelPolicy {}
-
+/// ## Design Philosophy
+///
+/// Tasks may or may not support cancellation (depending on whether they were
+/// created with `spawn_cancellable` or regular `spawn`). This split design ensures:
+///
+/// - **Resource acquisition**: Can respect cancellation tokens to avoid unnecessary allocation
+/// - **Task execution**: Always runs to completion; tasks handle their own cancellation
+///
+/// This makes it impossible to accidentally interrupt task execution with `tokio::select!`.
 #[async_trait]
-impl TaskScheduler for UnlimitedScheduler {
-    async fn schedule(
+pub trait TaskScheduler: Send + Sync + std::fmt::Debug {
+    /// Acquire resources needed for task execution and return a guard
+    ///
+    /// This method handles resource allocation (permits, queue slots, etc.) and
+    /// can respect cancellation tokens to avoid unnecessary resource consumption.
+    ///
+    /// ## Cancellation Behavior
+    ///
+    /// The `cancel_token` is used for scheduler-level cancellation (e.g., "don't start new work").
+    /// If cancellation is requested before or during resource acquisition, this method
+    /// should return `SchedulingResult::Cancelled`.
+    ///
+    /// # Arguments
+    /// * `cancel_token` - Optional cancellation token for scheduler-level cancellation
+    ///
+    /// # Returns
+    /// * `SchedulingResult::Execute(guard)` - Resources acquired, ready to execute
+    /// * `SchedulingResult::Cancelled` - Cancelled before or during resource acquisition
+    /// * `SchedulingResult::Rejected(reason)` - Resources unavailable or policy violation
+    async fn acquire_execution_slot(
         &self,
-        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
         cancel_token: Option<CancellationToken>,
-    ) -> SchedulingResult<Result<()>> {
-        debug!("Executing task immediately (unlimited scheduler)");
-
-        // Check for cancellation before starting
-        if let Some(ref token) = cancel_token {
-            if token.is_cancelled() {
-                debug!("Task cancelled before execution");
-                return SchedulingResult::Cancelled;
-            }
-        }
-
-        // Execute the task immediately
-        let result = task.await;
-        debug!("Task execution completed");
-
-        SchedulingResult::Execute(result)
-    }
+    ) -> SchedulingResult<Box<dyn ResourceGuard>>;
 }
 
 /// Trait for implementing error handling policies
@@ -755,13 +737,6 @@ pub trait HierarchicalTaskMetrics: Send + Sync + std::fmt::Debug {
             self.failed() as f64 / total as f64
         }
     }
-
-    /// Get Prometheus metrics output (only available for root trackers)
-    ///
-    /// Child trackers will return None since they don't expose metrics directly
-    fn prometheus_metrics(&self) -> Option<Result<String>> {
-        None
-    }
 }
 
 /// Root tracker metrics with Prometheus integration
@@ -931,13 +906,6 @@ impl HierarchicalTaskMetrics for RootTaskMetrics {
 
     fn active(&self) -> u64 {
         self.local_metrics.active()
-    }
-
-    fn prometheus_metrics(&self) -> Option<Result<String>> {
-        // Root trackers with Prometheus can expose their metrics
-        // Implementation would need access to the registry to generate output
-        // For now, we'll let the user access individual Prometheus metrics directly
-        None
     }
 }
 
@@ -1646,26 +1614,6 @@ impl TaskTracker {
         self.metrics.as_ref()
     }
 
-    /// Get Prometheus metrics output if this is a root tracker with Prometheus integration
-    ///
-    /// Returns None for child trackers or root trackers without Prometheus.
-    ///
-    /// # Example
-    /// ```rust
-    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
-    /// # fn example(tracker: &TaskTracker) {
-    /// if let Some(prometheus_result) = tracker.prometheus_metrics() {
-    ///     match prometheus_result {
-    ///         Ok(metrics_text) => println!("Prometheus metrics: {}", metrics_text),
-    ///         Err(e) => eprintln!("Failed to get metrics: {}", e),
-    ///     }
-    /// }
-    /// # }
-    /// ```
-    pub fn prometheus_metrics(&self) -> Option<Result<String>> {
-        self.metrics.prometheus_metrics()
-    }
-
     /// Cancel this tracker and all its tasks
     ///
     /// This will signal cancellation to all currently running tasks and prevent new tasks from being spawned.
@@ -1854,9 +1802,9 @@ impl TaskTracker {
     ///
     /// Returns trackers in bottom-up order (children before parents) for safe shutdown.
     /// This avoids recursive async calls and associated heap allocations.
-    fn collect_hierarchy(&self) -> Vec<Arc<TaskTracker>> {
+    fn collect_hierarchy(start: Arc<TaskTracker>) -> Vec<Arc<TaskTracker>> {
         let mut result = Vec::new();
-        let mut stack = vec![Arc::new(TaskTracker::clone(self))];
+        let mut stack = vec![start];
         let mut visited = HashSet::new();
 
         // Collect all trackers using depth-first search
@@ -1868,7 +1816,7 @@ impl TaskTracker {
             visited.insert(tracker_ptr);
 
             // Add current tracker to result
-            result.push(tracker.clone());
+            result.push(Arc::clone(&tracker));
 
             // Add children to stack for processing
             if let Ok(children_guard) = tracker.children.read() {
@@ -1889,6 +1837,7 @@ impl TaskTracker {
     }
 
     /// Execute a task with scheduling and error handling policies
+    #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
     async fn execute_with_policies<F, T>(
         task_id: TaskId,
         future: F,
@@ -1901,16 +1850,7 @@ impl TaskTracker {
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
-        debug!(?task_id, "Starting task execution");
-
-        // Check for cancellation before starting
-        if let Some(ref token) = cancel_token {
-            if token.is_cancelled() {
-                debug!(?task_id, "Task cancelled before execution");
-                return Err(anyhow::anyhow!("Task was cancelled before execution"));
-            }
-        }
-
+        debug!("Starting task execution");
         metrics.increment_active();
 
         // Create a result slot for capturing the task result
@@ -1925,11 +1865,18 @@ impl TaskTracker {
             Ok(())
         });
 
-        // Execute through scheduler with cancellation token
-        let scheduling_result = scheduler.schedule(boxed_future, cancel_token).await;
+        // Acquire execution slot through scheduler with cancellation token
+        let guard_result = async { scheduler.acquire_execution_slot(cancel_token).await }
+            .instrument(tracing::debug_span!("scheduler_resource_acquisition"))
+            .await;
 
-        let final_result = match scheduling_result {
-            SchedulingResult::Execute(Ok(())) => {
+        let final_result = match guard_result {
+            SchedulingResult::Execute(guard) => {
+                // Execute task through the guard (enforces no cancellation during execution)
+                let _execution_result = async { guard.execute_task(boxed_future).await }
+                    .instrument(tracing::debug_span!("task_execution"))
+                    .await;
+
                 // Extract the actual result from our slot
                 let result = result_slot
                     .lock()
@@ -1940,7 +1887,7 @@ impl TaskTracker {
                 match result {
                     Ok(value) => {
                         metrics.increment_success();
-                        debug!(?task_id, "Task completed successfully");
+                        debug!("Task completed successfully");
                         Ok(value)
                     }
                     Err(error) => {
@@ -1948,30 +1895,24 @@ impl TaskTracker {
                         error_policy.on_error(&error, task_id).await;
 
                         if error_policy.should_cancel_on_error(&error) {
-                            warn!(?task_id, ?error, "Error triggered cancellation");
+                            warn!(?error, "Error triggered cancellation");
                             // Note: Individual task cancellation would need to be handled
                             // by the error policy if it has access to the tracker
                         }
 
-                        debug!(?task_id, ?error, "Task failed");
+                        debug!(?error, "Task failed");
                         Err(error)
                     }
                 }
             }
-            SchedulingResult::Execute(Err(error)) => {
-                metrics.increment_failed();
-                error_policy.on_error(&error, task_id).await;
-                debug!(?task_id, ?error, "Task failed during scheduling execution");
-                Err(error)
-            }
             SchedulingResult::Cancelled => {
                 metrics.increment_cancelled();
-                debug!(?task_id, "Task was cancelled");
+                debug!("Task was cancelled during resource acquisition");
                 Err(anyhow::anyhow!("Task was cancelled"))
             }
             SchedulingResult::Rejected(reason) => {
                 metrics.increment_rejected();
-                debug!(?task_id, reason, "Task was rejected by scheduler");
+                debug!(reason, "Task was rejected by scheduler");
                 Err(anyhow::anyhow!("Task rejected: {}", reason))
             }
         };
@@ -1981,18 +1922,119 @@ impl TaskTracker {
     }
 }
 
-// Clone is automatically derived, but we need custom behavior for some fields
-impl Clone for TaskTracker {
-    fn clone(&self) -> Self {
-        Self {
-            inner: TokioTaskTracker::new(), // New tracker for clone
-            parent: self.parent.clone(),
-            scheduler: self.scheduler.clone(),
-            error_policy: self.error_policy.clone(),
-            metrics: Arc::new(DefaultRootTaskMetrics::new()), // New default metrics for clone
-            cancel_token: self.cancel_token.clone(),          // Same token for clone
-            children: Arc::new(RwLock::new(Vec::new())),      // New empty children list for clone
+// Blanket implementation for all schedulers
+impl ArcPolicy for UnlimitedScheduler {}
+impl ArcPolicy for SemaphoreScheduler {}
+
+// Blanket implementation for all error policies
+impl ArcPolicy for LogOnlyPolicy {}
+impl ArcPolicy for CancelOnError {}
+impl ArcPolicy for ThresholdCancelPolicy {}
+impl ArcPolicy for RateCancelPolicy {}
+
+/// Resource guard for unlimited scheduling
+///
+/// This guard enforces that once task execution begins, it always runs to completion.
+#[derive(Debug)]
+pub struct UnlimitedGuard;
+
+#[async_trait]
+impl ResourceGuard for UnlimitedGuard {
+    async fn execute_task(
+        self: Box<Self>,
+        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
+    ) -> Result<()> {
+        debug!("Executing task with unlimited scheduler");
+        let result = task.await;
+        debug!("Task execution completed");
+        result
+    }
+}
+
+/// Unlimited task scheduler that executes all tasks immediately
+///
+/// This scheduler provides no concurrency limits and executes all submitted tasks
+/// immediately. Useful for testing, high-throughput scenarios, or when external
+/// systems provide the concurrency control.
+///
+/// ## Cancellation Behavior
+///
+/// - Respects cancellation tokens before resource acquisition
+/// - Once execution begins (via ResourceGuard), always awaits task completion
+/// - Tasks handle their own cancellation internally (if created with `spawn_cancellable`)
+///
+/// # Example
+/// ```rust
+/// # use dynamo_runtime::utils::tasks::tracker::UnlimitedScheduler;
+/// let scheduler = UnlimitedScheduler::new();
+/// ```
+#[derive(Debug)]
+pub struct UnlimitedScheduler;
+
+impl UnlimitedScheduler {
+    /// Create a new unlimited scheduler
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Create a new unlimited scheduler returning Arc
+    pub fn new_arc() -> Arc<Self> {
+        Self::new().new_arc()
+    }
+}
+
+impl Default for UnlimitedScheduler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl TaskScheduler for UnlimitedScheduler {
+    async fn acquire_execution_slot(
+        &self,
+        cancel_token: Option<CancellationToken>,
+    ) -> SchedulingResult<Box<dyn ResourceGuard>> {
+        debug!("Acquiring execution slot (unlimited scheduler)");
+
+        // Check for cancellation before allocating resources
+        if let Some(ref token) = cancel_token {
+            if token.is_cancelled() {
+                debug!("Task cancelled before acquiring execution slot");
+                return SchedulingResult::Cancelled;
+            }
         }
+
+        // No resource constraints for unlimited scheduler
+        debug!("Execution slot acquired immediately");
+        SchedulingResult::Execute(Box::new(UnlimitedGuard))
+    }
+}
+
+/// Resource guard for semaphore-based scheduling
+///
+/// This guard holds a semaphore permit and enforces that task execution
+/// always runs to completion. The permit is automatically released when
+/// the guard is dropped.
+#[derive(Debug)]
+pub struct SemaphoreGuard {
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[async_trait]
+impl ResourceGuard for SemaphoreGuard {
+    async fn execute_task(
+        self: Box<Self>,
+        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
+    ) -> Result<()> {
+        debug!("Executing task with semaphore scheduler");
+
+        // Execute task while holding permit
+        let result = task.await;
+
+        debug!("Released semaphore permit");
+        // Permit is automatically dropped here, releasing the semaphore
+        result
     }
 }
 
@@ -2000,6 +2042,16 @@ impl Clone for TaskTracker {
 ///
 /// Limits concurrent task execution using a [`tokio::sync::Semaphore`].
 /// Tasks will wait for an available permit before executing.
+///
+/// ## Cancellation Behavior
+///
+/// - Respects cancellation tokens before and during permit acquisition
+/// - Once a permit is acquired (via ResourceGuard), always awaits task completion
+/// - Holds the permit until the task completes (regardless of cancellation)
+/// - Tasks handle their own cancellation internally (if created with `spawn_cancellable`)
+///
+/// This ensures that permits are not leaked when tasks are cancelled, while still
+/// allowing cancellable tasks to terminate gracefully on their own.
 ///
 /// # Example
 /// ```rust
@@ -2037,11 +2089,12 @@ impl SemaphoreScheduler {
 
 #[async_trait]
 impl TaskScheduler for SemaphoreScheduler {
-    async fn schedule(
+    async fn acquire_execution_slot(
         &self,
-        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
         cancel_token: Option<CancellationToken>,
-    ) -> SchedulingResult<Result<()>> {
+    ) -> SchedulingResult<Box<dyn ResourceGuard>> {
+        debug!("Acquiring semaphore permit");
+
         // Check for cancellation before attempting to acquire semaphore
         if let Some(ref token) = cancel_token {
             if token.is_cancelled() {
@@ -2053,7 +2106,7 @@ impl TaskScheduler for SemaphoreScheduler {
         // Try to acquire a permit, with cancellation support
         let permit = if let Some(ref token) = cancel_token {
             tokio::select! {
-                result = self.semaphore.acquire() => {
+                result = self.semaphore.clone().acquire_owned() => {
                     match result {
                         Ok(permit) => permit,
                         Err(_) => return SchedulingResult::Cancelled,
@@ -2065,33 +2118,14 @@ impl TaskScheduler for SemaphoreScheduler {
                 }
             }
         } else {
-            match self.semaphore.acquire().await {
+            match self.semaphore.clone().acquire_owned().await {
                 Ok(permit) => permit,
                 Err(_) => return SchedulingResult::Cancelled,
             }
         };
 
-        debug!("Acquired semaphore permit, executing task");
-
-        // Execute task while holding permit, with cancellation support
-        let result = if let Some(ref token) = cancel_token {
-            tokio::select! {
-                result = task => result,
-                _ = token.cancelled() => {
-                    debug!("Task cancelled during execution");
-                    drop(permit);
-                    return SchedulingResult::Cancelled;
-                }
-            }
-        } else {
-            task.await
-        };
-
-        // Permit is automatically dropped here, releasing the semaphore
-        drop(permit);
-        debug!("Released semaphore permit");
-
-        SchedulingResult::Execute(result)
+        debug!("Acquired semaphore permit");
+        SchedulingResult::Execute(Box::new(SemaphoreGuard { _permit: permit }))
     }
 }
 
@@ -3245,31 +3279,6 @@ mod tests {
 
         // Parent should see the aggregated metrics
         // Note: Due to hierarchical aggregation, these metrics propagate up
-    }
-
-    #[tokio::test]
-    async fn test_default_vs_prometheus_metrics() {
-        // Test that both default and Prometheus metrics work
-        let scheduler = create_semaphore_scheduler(5);
-        let error_policy = create_log_policy();
-
-        // Create tracker with default metrics
-        let default_tracker = TaskTracker::new(scheduler.clone(), error_policy.clone());
-
-        // Run a task with default metrics
-        let handle = default_tracker.spawn(async { Ok(42) });
-        let result = handle.await.unwrap().unwrap();
-        assert_eq!(result, 42);
-
-        // Check that default tracker doesn't expose Prometheus metrics
-        assert!(
-            default_tracker.prometheus_metrics().is_none(),
-            "Default tracker should not expose Prometheus metrics"
-        );
-
-        // Verify metrics work normally
-        assert_eq!(default_tracker.metrics().success(), 1);
-        assert_eq!(default_tracker.metrics().failed(), 0);
     }
 
     #[tokio::test]
