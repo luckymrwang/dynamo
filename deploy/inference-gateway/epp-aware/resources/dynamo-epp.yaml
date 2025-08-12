@@ -63,7 +63,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
       - name: frontend-router
-        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:gw-frontend-v1
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:gw-frontend-v2
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh", "-c"]
         args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
@@ -80,26 +80,6 @@ spec:
           requests:
             cpu: "1"
             memory: "2Gi"
-        startupProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 5
-          timeoutSeconds: 5
-          failureThreshold: 60
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 10
-          timeoutSeconds: 5
-          failureThreshold: 3
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8000
-          periodSeconds: 5
-          timeoutSeconds: 5
-          failureThreshold: 3
+
 
 
