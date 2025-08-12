@@ -28,10 +28,9 @@
 //! ## Important: Close-Before-Wait Pattern
 //!
 //! This implementation follows Tokio's TaskTracker requirement that `close()` must be called
-//! before `wait()` to prevent deadlocks. Our hierarchical methods automatically handle this:
-//! - `wait()` closes each tracker before waiting (hierarchically)
-//! - `close()` closes the entire tracker hierarchy
-//! - Both methods use depth-first traversal of the dependency tree
+//! before `wait()` to prevent deadlocks. Our hierarchical `join()` method automatically handles this:
+//! - `join()` closes each tracker before waiting (hierarchically)
+//! - Uses depth-first traversal of the dependency tree for proper shutdown order
 //!
 //! ## Quick Start
 //!
@@ -62,10 +61,10 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! // Create root tracker with failure threshold policy
 //! let (error_policy, _token) = ThresholdCancelPolicy::new_arc(5);
-//! let root = TaskTracker::builder()
+//! let root = std::sync::Arc::new(TaskTracker::builder()
 //!     .scheduler(UnlimitedScheduler::new_arc())
 //!     .error_policy(error_policy)
-//!     .build()?;
+//!     .build()?);
 //!
 //! // Create child trackers for different components
 //! let api_handler = root.child_tracker()?;  // Inherits policies
@@ -81,8 +80,8 @@
 //! background_jobs.spawn(async { Ok(()) });
 //! rate_limited.spawn(async { Ok(()) });
 //!
-//! // Wait for all children hierarchically
-//! root.wait().await;
+//! // Join all children hierarchically
+//! root.clone().join().await;
 //! assert_eq!(root.metrics().success(), 3); // Sees all successes
 //! # Ok(())
 //! # }
@@ -128,10 +127,10 @@
 //! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let tracker = TaskTracker::builder()
+//! let tracker = std::sync::Arc::new(TaskTracker::builder()
 //!     .scheduler(SemaphoreScheduler::with_permits(2))  // Only 2 concurrent tasks
 //!     .error_policy(LogOnlyPolicy::new_arc())
-//!     .build()?;
+//!     .build()?);
 //!
 //! // Spawn multiple tasks
 //! for i in 0..5 {
@@ -148,7 +147,7 @@
 //! println!("Queued: {}", metrics.queued());        // 3 tasks waiting in scheduler queue
 //! println!("Pending: {}", metrics.pending());      // 5 tasks not yet completed
 //!
-//! tracker.wait().await;
+//! tracker.clone().join().await;
 //! assert_eq!(metrics.success(), 5);
 //! assert_eq!(metrics.pending(), 0);
 //! # Ok(())
@@ -1323,12 +1322,17 @@ impl TaskTracker {
     /// let error_policy = Arc::new(LogOnlyPolicy::new());
     /// let tracker = TaskTracker::new(scheduler, error_policy);
     /// ```
-    pub fn new(scheduler: Arc<dyn TaskScheduler>, error_policy: Arc<dyn OnErrorPolicy>) -> Self {
-        Self::builder()
-            .scheduler(scheduler)
-            .error_policy(error_policy)
-            .build()
-            .unwrap()
+    pub fn new(
+        scheduler: Arc<dyn TaskScheduler>,
+        error_policy: Arc<dyn OnErrorPolicy>,
+    ) -> Arc<Self> {
+        Arc::new(
+            Self::builder()
+                .scheduler(scheduler)
+                .error_policy(error_policy)
+                .build()
+                .unwrap(),
+        )
     }
 
     /// Create a new root task tracker with Prometheus metrics integration
@@ -1362,15 +1366,17 @@ impl TaskTracker {
         error_policy: Arc<dyn OnErrorPolicy>,
         registry: &R,
         component_name: &str,
-    ) -> anyhow::Result<Self> {
+    ) -> anyhow::Result<Arc<Self>> {
         let prometheus_metrics = Arc::new(RootTaskMetrics::new(registry, component_name)?);
 
-        Ok(Self::builder()
-            .scheduler(scheduler)
-            .error_policy(error_policy)
-            .metrics(prometheus_metrics)
-            .build()
-            .unwrap())
+        Ok(Arc::new(
+            Self::builder()
+                .scheduler(scheduler)
+                .error_policy(error_policy)
+                .metrics(prometheus_metrics)
+                .build()
+                .unwrap(),
+        ))
     }
 
     /// Create a child tracker that inherits scheduling policy
@@ -1631,62 +1637,29 @@ impl TaskTracker {
         }
     }
 
-    /// Close the tracker and wait for all tasks to complete
+    /// Join this tracker and all child trackers
     ///
-    /// This prevents new tasks from being spawned and waits for all existing tasks to complete.
-    /// This closes this tracker AND all child trackers using hierarchical depth-first traversal.
-    /// For leaf trackers (no children), this only closes the local tracker.
+    /// This method gracefully shuts down the entire tracker hierarchy by:
+    /// 1. Closing all trackers (preventing new task spawning)
+    /// 2. Waiting for all existing tasks to complete
     ///
-    /// **Hierarchical Behavior:**
-    /// - Traverses the dependency tree depth-first
-    /// - Closes all child trackers before closing the parent
-    /// - Each tracker prevents new tasks and waits for existing tasks to complete
-    /// - This is the graceful shutdown method for the entire tracker hierarchy
-    pub async fn close(&self) {
-        // Fast path for leaf trackers (no children)
-        let is_leaf = {
-            let children_guard = self.children.read().unwrap();
-            children_guard.is_empty()
-        };
-
-        if is_leaf {
-            self.inner.close();
-            return;
-        }
-
-        // Hierarchical path for trackers with children
-        let children: Vec<Arc<TaskTracker>> = {
-            let children_guard = self.children.read().unwrap();
-            children_guard
-                .iter()
-                .filter_map(|weak| weak.upgrade())
-                .collect()
-        };
-
-        // Close each child recursively (depth-first)
-        for child in children {
-            Box::pin(child.close()).await;
-        }
-
-        // Finally, close ourselves
-        self.inner.close();
-    }
-
-    /// Wait for all tasks to complete
-    ///
-    /// This waits for all tasks in this tracker AND all child trackers using a hierarchical
-    /// depth-first traversal. For leaf trackers (no children), this only waits for local tasks.
-    ///
-    /// **Important:** This method automatically closes the tracker to prevent new tasks from being
-    /// spawned, then waits for all existing tasks to complete. This is required by Tokio's TaskTracker.
-    /// After this call, no new tasks can be spawned on this tracker or any of its children.
+    /// Uses stack-safe traversal to prevent stack overflow in deep hierarchies.
+    /// Children are processed before parents to ensure proper shutdown order.
     ///
     /// **Hierarchical Behavior:**
-    /// - Traverses the dependency tree depth-first
-    /// - Waits for all child trackers before waiting for the parent
+    /// - Processes children before parents to ensure proper shutdown order
     /// - Each tracker is closed before waiting (Tokio requirement)
     /// - Leaf trackers simply close and wait for their own tasks
-    pub async fn wait(&self) {
+    ///
+    /// # Example
+    /// ```rust
+    /// # use std::sync::Arc;
+    /// # use dynamo_runtime::utils::tasks::tracker::TaskTracker;
+    /// # async fn example(tracker: Arc<TaskTracker>) {
+    /// tracker.join().await;
+    /// # }
+    /// ```
+    pub async fn join(self: Arc<Self>) {
         // Fast path for leaf trackers (no children)
         let is_leaf = {
             let children_guard = self.children.read().unwrap();
@@ -1699,23 +1672,13 @@ impl TaskTracker {
             return;
         }
 
-        // Hierarchical path for trackers with children
-        let children: Vec<Arc<TaskTracker>> = {
-            let children_guard = self.children.read().unwrap();
-            children_guard
-                .iter()
-                .filter_map(|weak| weak.upgrade())
-                .collect()
-        };
-
-        // Wait for each child recursively (depth-first)
-        for child in children {
-            Box::pin(child.wait()).await;
+        // Stack-safe traversal for deep hierarchies
+        // Processes children before parents to ensure proper shutdown order
+        let trackers = Self::collect_hierarchy(self);
+        for t in trackers {
+            t.inner.close();
+            t.inner.wait().await;
         }
-
-        // Finally, close and wait for our own tasks (required by Tokio TaskTracker)
-        self.inner.close();
-        self.inner.wait().await;
     }
 
     /// Check if this tracker is closed
@@ -2730,7 +2693,7 @@ mod tests {
         tx.send(()).ok();
 
         // Close tracker and wait for completion
-        tracker.close().await;
+        tracker.clone().join().await;
 
         // All tasks should complete successfully
         for handle in handles {
@@ -3306,8 +3269,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hierarchical_wait_operations() {
-        // Test that parent.wait() waits for child tasks too
+    async fn test_hierarchical_join_waits_for_all() {
+        // Test that parent.join() waits for child tasks too
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
@@ -3353,17 +3316,17 @@ mod tests {
             Ok(())
         });
 
-        // Test hierarchical wait - should wait for ALL tasks in hierarchy
-        println!("[TEST] About to call parent.wait()");
+        // Test hierarchical join - should wait for ALL tasks in hierarchy
+        println!("[TEST] About to call parent.join()");
         let start = std::time::Instant::now();
-        parent.wait().await; // This should wait for ALL tasks
+        parent.join().await; // This should wait for ALL tasks
         let elapsed = start.elapsed();
-        println!("[TEST] parent.wait() completed in {:?}", elapsed);
+        println!("[TEST] parent.join() completed in {:?}", elapsed);
 
         // Should have waited for the longest task (grandchild at 125ms)
         assert!(
             elapsed >= Duration::from_millis(120),
-            "Hierarchical wait should wait for longest task"
+            "Hierarchical join should wait for longest task"
         );
 
         // All tasks should be complete
@@ -3382,8 +3345,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hierarchical_wait_waits_for_children() {
-        // Test that wait() waits for child tasks (hierarchical behavior)
+    async fn test_hierarchical_join_waits_for_children() {
+        // Test that join() waits for child tasks (hierarchical behavior)
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
@@ -3400,21 +3363,21 @@ mod tests {
             Ok(())
         });
 
-        // Hierarchical wait should wait for both parent and child tasks
+        // Hierarchical join should wait for both parent and child tasks
         let start = std::time::Instant::now();
-        parent.wait().await; // Should wait for both (hierarchical by default)
+        parent.join().await; // Should wait for both (hierarchical by default)
         let elapsed = start.elapsed();
 
         // Should have waited for the longer child task (100ms)
         assert!(
             elapsed >= Duration::from_millis(90),
-            "Hierarchical wait should wait for all child tasks"
+            "Hierarchical join should wait for all child tasks"
         );
     }
 
     #[tokio::test]
-    async fn test_hierarchical_close_operations() {
-        // Test that parent.close() closes child trackers too
+    async fn test_hierarchical_join_operations() {
+        // Test that parent.join() closes and waits for child trackers too
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
@@ -3426,8 +3389,8 @@ mod tests {
         assert!(!child.is_closed());
         assert!(!grandchild.is_closed());
 
-        // Close parent (hierarchical by default)
-        parent.close().await;
+        // Join parent (hierarchical by default - closes and waits for all)
+        parent.clone().join().await;
 
         // All should be closed
         assert!(parent.is_closed());
@@ -3491,7 +3454,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_child_creation_fails_after_close() {
+    async fn test_child_creation_fails_after_join() {
         // Test that child tracker creation fails from closed parent
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
@@ -3501,7 +3464,7 @@ mod tests {
         let _child = parent.child_tracker().unwrap();
 
         // Close the parent tracker
-        parent.close().await;
+        parent.clone().join().await;
         assert!(parent.is_closed());
 
         // Now, trying to create a child should fail
@@ -3514,7 +3477,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_child_builder_fails_after_close() {
+    async fn test_child_builder_fails_after_join() {
         // Test that child tracker builder creation fails from closed parent
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
@@ -3524,7 +3487,7 @@ mod tests {
         let _child = parent.child_tracker_builder().build().unwrap();
 
         // Close the parent tracker
-        parent.close().await;
+        parent.clone().join().await;
         assert!(parent.is_closed());
 
         // Now, trying to create a child with builder should fail
@@ -3537,8 +3500,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_child_creation_succeeds_before_close() {
-        // Test that child creation works normally before parent is closed
+    async fn test_child_creation_succeeds_before_join() {
+        // Test that child creation works normally before parent is joined
         let scheduler = create_semaphore_scheduler(10);
         let error_policy = create_log_policy();
         let parent = TaskTracker::new(scheduler, error_policy);
