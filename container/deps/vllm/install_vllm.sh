@@ -121,8 +121,8 @@ if [ "$ARCH" = "arm64" ]; then
     echo "Attempting to install pinned PyTorch nightly versions..."
     if ! uv pip install torch==2.8.0.dev20250616+cu129 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
         echo "Pinned versions failed"
-        exit 1
-        # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+        # exit 1
+        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
     fi
 
     python use_existing_torch.py
