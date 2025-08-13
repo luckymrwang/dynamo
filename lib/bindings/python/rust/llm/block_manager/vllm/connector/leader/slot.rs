@@ -1019,6 +1019,15 @@ impl LocalTransferEngine {
     // This should be a composable unit that we can layer on specialized types of critical tasks
     // with their own sets of custom metrics.
     async fn execute(&mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
+        // create channels
+        // let (onboard_tx, onboard_rx) = channel();
+        // let (offload_tx, offload_rx) = channel();
+
+        // spawn two tasks with each rx to await a request and call process request
+
+        // let onboard_task =
+        // let offload_task =
+
         loop {
             tokio::select! {
                 _ = cancellation_token.cancelled() => {
@@ -1028,6 +1037,8 @@ impl LocalTransferEngine {
                 req = self.xfer_rx.recv() => {
                     match req {
                         Some(req) => {
+                            // inspect req
+                            // if onboard send to onboard_tx
                             if let Err(e) = self.process_request(req).await {
                                 tracing::error!("LocalTransferEngine: error processing request: {:?}", e);
                             }
@@ -1040,6 +1051,9 @@ impl LocalTransferEngine {
                 }
             }
         }
+
+        // drop all tx channels
+        // join/await the _tasks
 
         tracing::debug!("LocalTransferEngine: shutting down");
         Ok(())
