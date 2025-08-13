@@ -1,21 +1,199 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! # Task Tracker
+//! # Task Tracker - Hierarchical Task Management System
 //!
-//! A hierarchical task tracking system with composable scheduling and error policies.
+//! A composable task management system with configurable scheduling and error handling policies.
+//! The TaskTracker enables controlled concurrent execution with proper resource management,
+//! cancellation semantics, and retry support.
 //!
-//! ## Core Features
-//! - **Hierarchical Management**: Parent-child relationships with automatic lifecycle management
-//! - **Pluggable Scheduling**: Semaphore limits, unlimited throughput, or custom policies
-//! - **Error Handling**: Cancel-on-error, log-only, threshold-based, or custom policies
-//! - **Rich Metrics**: Task counts, success/failure rates, queue depth (with Prometheus support)
-//! - **Cancellation**: Token-based with hierarchical propagation and isolation
-//! - **Safe Child Creation**: Prevents child creation from closed parents
+//! ## Architecture Overview
 //!
-//! Built on top of `tokio_util::task::TaskTracker` for robust task lifecycle management.
+//! The TaskTracker system is built around three core abstractions that compose together:
 //!
-//! ## Future Policies
+//! ### 1. **TaskScheduler** - Resource Management
+//!
+//! Controls when and how tasks acquire execution resources (permits, slots, etc.).
+//! Schedulers implement resource acquisition with cancellation support:
+//!
+//! ```text
+//! TaskScheduler::acquire_execution_slot(cancel_token) -> SchedulingResult<ResourceGuard>
+//! ```
+//!
+//! - **Resource Acquisition**: Can be cancelled to avoid unnecessary allocation
+//! - **RAII Guards**: Resources are automatically released when guards are dropped
+//! - **Pluggable**: Different scheduling policies (unlimited, semaphore, rate-limited, etc.)
+//!
+//! ### 2. **OnErrorPolicy** - Error Handling
+//!
+//! Defines how the system responds to task failures:
+//!
+//! ```text
+//! OnErrorPolicy::on_error(error, task_id) -> ErrorResponse
+//! ```
+//!
+//! - **ErrorResponse::Continue**: Log error, continue execution
+//! - **ErrorResponse::Cancel**: Cancel tracker and all children
+//! - **ErrorResponse::Custom(action)**: Execute custom logic that can return:
+//!   - `ActionResult::Continue`: Handle error and continue
+//!   - `ActionResult::Cancel`: Cancel tracker
+//!   - `ActionResult::Retry { delay }`: Retry the task (cancellable tasks only)
+//!
+//! ### 3. **Execution Pipeline** - Task Orchestration
+//!
+//! The execution pipeline coordinates scheduling, execution, and error handling:
+//!
+//! ```text
+//! 1. Acquire resources (scheduler.acquire_execution_slot)
+//! 2. Create task future (only after resources acquired)
+//! 3. Execute task while holding guard (RAII pattern)
+//! 4. Handle errors through policy (with retry support for cancellable tasks)
+//! 5. Update metrics and release resources
+//! ```
+//!
+//! ## Key Design Principles
+//!
+//! ### **Separation of Concerns**
+//! - **Scheduling**: When/how to allocate resources
+//! - **Execution**: Running tasks with proper resource management
+//! - **Error Handling**: Responding to failures with configurable policies
+//!
+//! ### **Composability**
+//! - Schedulers and error policies are independent and can be mixed/matched
+//! - Custom policies can be implemented via traits
+//! - Execution pipeline handles the coordination automatically
+//!
+//! ### **Resource Safety**
+//! - Resources are acquired before task creation (prevents early execution)
+//! - RAII pattern ensures resources are always released
+//! - Cancellation is supported during resource acquisition, not during execution
+//!
+//! ### **Retry Support**
+//! - Regular tasks (`spawn`): Cannot be retried (future is consumed)
+//! - Cancellable tasks (`spawn_cancellable`): Support retry via `FnMut` closures
+//! - Error policies can request retries via `ActionResult::Retry`
+//!
+//! ## Task Types
+//!
+//! ### Regular Tasks
+//! ```rust
+//! let handle = tracker.spawn(async { Ok(42) });
+//! ```
+//! - Simple futures that run to completion
+//! - Cannot be retried (future is consumed on first execution)
+//! - Suitable for one-shot operations
+//!
+//! ### Cancellable Tasks
+//! ```rust
+//! let handle = tracker.spawn_cancellable(|cancel_token| async move {
+//!     // Task can check cancel_token.is_cancelled() or use tokio::select!
+//!     CancellableTaskResult::Ok(42)
+//! });
+//! ```
+//! - Receive a `CancellationToken` for cooperative cancellation
+//! - Support retry via `FnMut` closures (can be called multiple times)
+//! - Return `CancellableTaskResult` to indicate success/cancellation/error
+//!
+//! ## Hierarchical Structure
+//!
+//! TaskTrackers form parent-child relationships:
+//! - **Metrics**: Child metrics aggregate to parents
+//! - **Cancellation**: Parent cancellation propagates to children
+//! - **Independence**: Child cancellation doesn't affect parents
+//! - **Cleanup**: `join()` waits for all descendants bottom-up
+//!
+//! ## Metrics and Observability
+//!
+//! Built-in metrics track task lifecycle:
+//! - `issued`: Tasks submitted via spawn methods
+//! - `active`: Currently executing tasks
+//! - `success/failed/cancelled/rejected`: Final outcomes
+//! - `pending`: Issued but not completed (issued - completed)
+//! - `queued`: Waiting for resources (pending - active)
+//!
+//! Optional Prometheus integration available via `RootTaskMetrics`.
+//!
+//! ## Usage Examples
+//!
+//! ### Basic Task Execution
+//! ```rust
+//! use dynamo_runtime::utils::tasks::tracker::*;
+//! use std::sync::Arc;
+//!
+//! # #[tokio::main]
+//! # async fn main() -> anyhow::Result<()> {
+//! let scheduler = SemaphoreScheduler::with_permits(10);
+//! let error_policy = LogOnlyPolicy::new();
+//! let tracker = TaskTracker::new(scheduler, error_policy)?;
+//!
+//! let handle = tracker.spawn(async { Ok(42) });
+//! let result = handle.await??;
+//! assert_eq!(result, 42);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Cancellable Tasks with Retry
+//! ```rust
+//! # use dynamo_runtime::utils::tasks::tracker::*;
+//! # use std::sync::Arc;
+//! # #[tokio::main]
+//! # async fn main() -> anyhow::Result<()> {
+//! # let scheduler = SemaphoreScheduler::with_permits(10);
+//! # let error_policy = LogOnlyPolicy::new();
+//! # let tracker = TaskTracker::new(scheduler, error_policy)?;
+//! let handle = tracker.spawn_cancellable(|cancel_token| async move {
+//!     tokio::select! {
+//!         result = do_work() => CancellableTaskResult::Ok(result),
+//!         _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
+//!     }
+//! });
+//! # Ok(())
+//! # }
+//! # async fn do_work() -> i32 { 42 }
+//! ```
+//!
+//! ### Custom Error Policy with Retry
+//! ```rust
+//! # use dynamo_runtime::utils::tasks::tracker::*;
+//! # use std::sync::Arc;
+//! # use std::time::Duration;
+//! # #[derive(Debug)]
+//! struct RetryPolicy {
+//!     max_attempts: u32,
+//! }
+//!
+//! impl OnErrorPolicy for RetryPolicy {
+//!     fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
+//!         Arc::new(RetryPolicy { max_attempts: self.max_attempts })
+//!     }
+//!
+//!     fn on_error(&self, _error: &anyhow::Error, _task_id: TaskId) -> ErrorResponse {
+//!         ErrorResponse::Custom(Box::new(RetryAction { max_attempts: self.max_attempts }))
+//!     }
+//! }
+//!
+//! # #[derive(Debug)]
+//! struct RetryAction { max_attempts: u32 }
+//!
+//! impl OnErrorAction for RetryAction {
+//!     async fn execute(
+//!         &self,
+//!         _error: &anyhow::Error,
+//!         _task_id: TaskId,
+//!         attempt_count: u32,
+//!         _context: &TaskExecutionContext,
+//!     ) -> ActionResult {
+//!         if attempt_count < self.max_attempts {
+//!             ActionResult::Retry { delay: Some(Duration::from_millis(100)) }
+//!         } else {
+//!             ActionResult::Continue
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! ## Future Extensibility
 //!
 //! The system is designed for extensibility. See the source code for detailed TODO comments
 //! describing additional policies that can be implemented:
@@ -24,32 +202,6 @@
 //!
 //! Each TODO comment includes complete implementation guidance with data structures,
 //! algorithms, and dependencies needed for future contributors.
-//!
-//! ## Graceful Shutdown
-//!
-//! Use the `join()` method to gracefully shut down task hierarchies:
-//! - Automatically closes all trackers and waits for task completion
-//! - Processes children before parents to ensure proper shutdown order
-//! - Handles the entire hierarchy in a single call
-//!
-//! ## Quick Start
-//!
-//! ```rust
-//! use dynamo_runtime::utils::tasks::tracker::{TaskTracker, SemaphoreScheduler, LogOnlyPolicy};
-//!
-//! # async fn example() -> anyhow::Result<()> {
-//! // Simple setup with convenience constructors - minimal boilerplate!
-//! let tracker = TaskTracker::builder()
-//!     .scheduler(SemaphoreScheduler::with_permits(10))  // Returns Arc automatically
-//!     .error_policy(LogOnlyPolicy::new())             // Returns Arc automatically
-//!     .build()?;
-//!
-//! // Spawn tasks and get results
-//! let result = tracker.spawn(async { Ok(42) }).await??;
-//! assert_eq!(result, 42);
-//! # Ok(())
-//! # }
-//! ```
 //!
 //! ## Hierarchical Organization
 //!
@@ -543,6 +695,112 @@ pub struct TaskExecutionContext {
     // pub task_recreation: Box<dyn TaskRecreator>, // For implementing retry/restart
 }
 
+/// Result of task execution - unified for both regular and cancellable tasks
+#[derive(Debug)]
+enum TaskExecutionResult<T> {
+    /// Task completed successfully
+    Success(T),
+    /// Task was cancelled (only possible for cancellable tasks)
+    Cancelled,
+    /// Task failed with an error
+    Error(anyhow::Error),
+}
+
+/// Trait for executing different types of tasks in a unified way
+trait TaskExecutor<T> {
+    /// Execute the task with the given cancellation token
+    async fn execute(&mut self, cancel_token: CancellationToken) -> TaskExecutionResult<T>;
+
+    /// Whether this task type supports retry (can be called multiple times)
+    fn supports_retry(&self) -> bool;
+}
+
+/// Task executor for regular (non-cancellable) tasks
+struct RegularTaskExecutor<F, T>
+where
+    F: Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    future: Option<F>,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<F, T> RegularTaskExecutor<F, T>
+where
+    F: Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    fn new(future: F) -> Self {
+        Self {
+            future: Some(future),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<F, T> TaskExecutor<T> for RegularTaskExecutor<F, T>
+where
+    F: Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    async fn execute(&mut self, _cancel_token: CancellationToken) -> TaskExecutionResult<T> {
+        if let Some(future) = self.future.take() {
+            match future.await {
+                Ok(value) => TaskExecutionResult::Success(value),
+                Err(error) => TaskExecutionResult::Error(error),
+            }
+        } else {
+            // This should never happen since regular tasks don't support retry
+            TaskExecutionResult::Error(anyhow::anyhow!("Regular task already consumed"))
+        }
+    }
+
+    fn supports_retry(&self) -> bool {
+        false
+    }
+}
+
+/// Task executor for cancellable tasks
+struct CancellableTaskExecutor<F, Fut, T>
+where
+    F: FnMut(CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    task_fn: F,
+}
+
+impl<F, Fut, T> CancellableTaskExecutor<F, Fut, T>
+where
+    F: FnMut(CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    fn new(task_fn: F) -> Self {
+        Self { task_fn }
+    }
+}
+
+impl<F, Fut, T> TaskExecutor<T> for CancellableTaskExecutor<F, Fut, T>
+where
+    F: FnMut(CancellationToken) -> Fut + Send + 'static,
+    Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    async fn execute(&mut self, cancel_token: CancellationToken) -> TaskExecutionResult<T> {
+        let future = (self.task_fn)(cancel_token);
+        match future.await {
+            CancellableTaskResult::Ok(value) => TaskExecutionResult::Success(value),
+            CancellableTaskResult::Cancelled => TaskExecutionResult::Cancelled,
+            CancellableTaskResult::Err(error) => TaskExecutionResult::Error(error),
+        }
+    }
+
+    fn supports_retry(&self) -> bool {
+        true
+    }
+}
+
 /// Common functionality for policy Arc construction
 ///
 /// This trait provides a standardized `new_arc()` method for all policy types,
@@ -608,22 +866,16 @@ pub enum SchedulingResult<T> {
 /// This trait enforces proper cancellation semantics by separating resource
 /// management from task execution. Once a guard is acquired, task execution
 /// must always run to completion.
-#[async_trait]
-pub trait ResourceGuard: Send {
-    /// Execute a task to completion
-    ///
-    /// This method MUST always await the task completion. No cancellation
-    /// token is provided to prevent interrupting task execution.
-    ///
-    /// Tasks that support cancellation will handle it internally and return
-    /// appropriately when their cancellation token is triggered.
-    ///
-    /// # Arguments
-    /// * `task` - The task future to execute (may or may not support cancellation)
-    async fn execute_task(
-        self: Box<Self>,
-        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
-    ) -> Result<()>;
+/// Resource guard for task execution
+///
+/// This trait represents resources (permits, slots, etc.) acquired from a scheduler
+/// that must be held during task execution. The guard automatically releases
+/// resources when dropped, implementing proper RAII semantics.
+///
+/// Guards are returned by `TaskScheduler::acquire_execution_slot()` and must
+/// be held in scope while the task executes to ensure resources remain allocated.
+pub trait ResourceGuard: Send + 'static {
+    // Marker trait - resources are released via Drop on the concrete type
 }
 
 /// Trait for implementing task scheduling policies
@@ -1694,7 +1946,7 @@ impl TaskTracker {
     /// ```
     pub fn spawn_cancellable<F, Fut, T>(&self, task_fn: F) -> JoinHandle<Result<T, TaskError>>
     where
-        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        F: FnMut(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
         T: Send + 'static,
     {
@@ -1917,7 +2169,7 @@ impl TaskTrackerInner {
         task_fn: F,
     ) -> Result<JoinHandle<Result<T, TaskError>>, TaskError>
     where
-        F: FnOnce(CancellationToken) -> Fut + Send + 'static,
+        F: FnMut(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
         T: Send + 'static,
     {
@@ -1935,33 +2187,9 @@ impl TaskTrackerInner {
         // Clone the inner Arc to move into the task
         let inner = self.clone();
 
-        // Create the future by calling the task function with the cancellation token
-        let cancellable_future = task_fn(inner.cancel_token.child_token());
-
-        // Handle CancellableTaskResult directly and route to proper TaskError
-        let wrapped_future = async move {
-            // Execute the cancellable task first
-            let task_result = cancellable_future.await;
-
-            match task_result {
-                CancellableTaskResult::Ok(value) => {
-                    // For successful results, still go through execute_with_policies for consistency
-                    let success_future = async move { Ok(value) };
-                    Self::execute_with_policies(task_id, success_future, inner).await
-                }
-                CancellableTaskResult::Cancelled => {
-                    // Handle cancellation directly - increment metrics and return TaskError::Cancelled
-                    inner.metrics.increment_cancelled();
-                    debug!("Task was cancelled during execution (cancellable task)");
-                    Err(TaskError::Cancelled)
-                }
-                CancellableTaskResult::Err(error) => {
-                    // For errors, go through execute_with_policies
-                    let error_future = async move { Err(error) };
-                    Self::execute_with_policies(task_id, error_future, inner).await
-                }
-            }
-        };
+        // Use the new execution pipeline that defers task creation until after guard acquisition
+        let wrapped_future =
+            async move { Self::execute_cancellable_with_policies(task_id, task_fn, inner).await };
 
         // Let tokio handle the actual task tracking
         Ok(self.tokio_tracker.spawn(wrapped_future))
@@ -2064,7 +2292,7 @@ impl TaskTrackerInner {
         result
     }
 
-    /// Execute a task with scheduling and error handling policies
+    /// Execute a regular task with scheduling and error handling policies
     #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
     async fn execute_with_policies<F, T>(
         task_id: TaskId,
@@ -2075,107 +2303,175 @@ impl TaskTrackerInner {
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
     {
+        // Wrap regular future in a task executor that doesn't support retry
+        let task_executor = RegularTaskExecutor::new(future);
+        Self::execute_with_retry_loop(task_id, task_executor, inner).await
+    }
+
+    /// Execute a cancellable task with scheduling and error handling policies
+    #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
+    async fn execute_cancellable_with_policies<F, Fut, T>(
+        task_id: TaskId,
+        task_fn: F,
+        inner: Arc<TaskTrackerInner>,
+    ) -> Result<T, TaskError>
+    where
+        F: FnMut(CancellationToken) -> Fut + Send + 'static,
+        Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
+        T: Send + 'static,
+    {
+        // Wrap cancellable task function in a task executor that supports retry
+        let task_executor = CancellableTaskExecutor::new(task_fn);
+        Self::execute_with_retry_loop(task_id, task_executor, inner).await
+    }
+
+    /// Core execution loop with retry support - unified for both task types
+    #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
+    async fn execute_with_retry_loop<E, T>(
+        task_id: TaskId,
+        mut task_executor: E,
+        inner: Arc<TaskTrackerInner>,
+    ) -> Result<T, TaskError>
+    where
+        E: TaskExecutor<T> + Send + 'static,
+        T: Send + 'static,
+    {
         debug!("Starting task execution");
+        let mut attempt_count = 1u32;
 
-        // Create a result slot for capturing the task result
-        let result_slot: Arc<tokio::sync::Mutex<Option<Result<T>>>> =
-            Arc::new(tokio::sync::Mutex::new(None));
-        let result_slot_clone = result_slot.clone();
+        loop {
+            // Acquire execution slot through scheduler with cancellation token
+            let guard_result = async {
+                inner
+                    .scheduler
+                    .acquire_execution_slot(inner.cancel_token.child_token())
+                    .await
+            }
+            .instrument(tracing::debug_span!("scheduler_resource_acquisition"))
+            .await;
 
-        // Box and pin the future, capturing the result
-        let boxed_future = Box::pin(async move {
-            let result = future.await;
-            *result_slot_clone.lock().await = Some(result);
-            Ok(())
-        });
+            match guard_result {
+                SchedulingResult::Execute(_guard) => {
+                    // Only increment active counter AFTER successfully acquiring resources
+                    inner.metrics.increment_active();
 
-        // Acquire execution slot through scheduler with cancellation token
-        let guard_result = async {
-            inner
-                .scheduler
-                .acquire_execution_slot(inner.cancel_token.child_token())
-                .await
-        }
-        .instrument(tracing::debug_span!("scheduler_resource_acquisition"))
-        .await;
-
-        let final_result = match guard_result {
-            SchedulingResult::Execute(guard) => {
-                // Only increment active counter AFTER successfully acquiring the semaphore permit
-                inner.metrics.increment_active();
-                // Execute task through the guard (enforces no cancellation during execution)
-                let _execution_result = async { guard.execute_task(boxed_future).await }
+                    // Execute task while holding the guard (RAII pattern)
+                    let execution_result = async {
+                        debug!("Executing task with acquired resources");
+                        task_executor
+                            .execute(inner.cancel_token.child_token())
+                            .await
+                    }
                     .instrument(tracing::debug_span!("task_execution"))
                     .await;
 
-                // Extract the actual result from our slot
-                let result = result_slot
-                    .lock()
-                    .await
-                    .take()
-                    .expect("Result should have been set by completed future");
+                    // Decrement active counter (guard will be dropped automatically)
+                    inner.metrics.decrement_active();
 
-                match result {
-                    Ok(value) => {
-                        inner.metrics.increment_success();
-                        debug!("Task completed successfully");
-                        Ok(value)
-                    }
-                    Err(error) => {
-                        // Get error response from policy
-                        let response = inner.error_policy.on_error(&error, task_id);
+                    match execution_result {
+                        TaskExecutionResult::Success(value) => {
+                            inner.metrics.increment_success();
+                            debug!("Task completed successfully");
+                            return Ok(value);
+                        }
+                        TaskExecutionResult::Cancelled => {
+                            inner.metrics.increment_cancelled();
+                            debug!("Task was cancelled during execution");
+                            return Err(TaskError::Cancelled);
+                        }
+                        TaskExecutionResult::Error(error) => {
+                            // Handle error through policy
+                            let action_result =
+                                Self::handle_task_error(&error, task_id, attempt_count, &inner)
+                                    .await;
 
-                        match response {
-                            ErrorResponse::Continue => {
-                                inner.metrics.increment_failed();
-                                debug!(?error, "Task failed - continuing execution");
-                                Err(TaskError::Failed(error))
-                            }
-                            ErrorResponse::Cancel => {
-                                inner.metrics.increment_failed();
-                                warn!(?error, "Error triggered cancellation");
-                                inner.cancel();
-                                Err(TaskError::Failed(error))
-                            }
-                            ErrorResponse::Custom(action) => {
-                                // Execute the custom action
-                                inner.metrics.increment_failed();
-                                debug!(?error, "Task failed - executing custom action");
+                            match action_result {
+                                ActionResult::Continue => {
+                                    inner.metrics.increment_failed();
+                                    debug!(?error, "Task failed - continuing execution");
+                                    return Err(TaskError::Failed(error));
+                                }
+                                ActionResult::Cancel => {
+                                    inner.metrics.increment_failed();
+                                    warn!(?error, "Error triggered cancellation");
+                                    inner.cancel();
+                                    return Err(TaskError::Failed(error));
+                                }
+                                ActionResult::Retry { delay } => {
+                                    if !task_executor.supports_retry() {
+                                        // For tasks that don't support retry, log warning and treat as Continue
+                                        inner.metrics.increment_failed();
+                                        warn!(?error, "Task failed with retry request, but this task type cannot be retried");
+                                        return Err(TaskError::Failed(error));
+                                    }
 
-                                // Create execution context for the action
-                                let context = TaskExecutionContext {
-                                    scheduler: inner.scheduler.clone(),
-                                    metrics: inner.metrics.clone(),
-                                };
+                                    inner.metrics.increment_failed();
+                                    debug!(
+                                        ?error,
+                                        ?delay,
+                                        attempt = attempt_count,
+                                        "Retrying task after error"
+                                    );
 
-                                // Execute the custom action asynchronously
-                                let action_result =
-                                    action.execute(&error, task_id, 1, &context).await;
-                                debug!(?action_result, "Custom action completed");
+                                    if let Some(delay_duration) = delay {
+                                        tokio::time::sleep(delay_duration).await;
+                                    }
 
-                                Err(TaskError::Failed(error))
+                                    attempt_count += 1;
+                                    // Continue the loop to retry
+                                }
                             }
                         }
                     }
                 }
+                SchedulingResult::Cancelled => {
+                    inner.metrics.increment_cancelled();
+                    debug!("Task was cancelled during resource acquisition");
+                    return Err(TaskError::Cancelled);
+                }
+                SchedulingResult::Rejected(reason) => {
+                    inner.metrics.increment_rejected();
+                    debug!(reason, "Task was rejected by scheduler");
+                    return Err(TaskError::Failed(anyhow::anyhow!(
+                        "Task rejected: {}",
+                        reason
+                    )));
+                }
             }
-            SchedulingResult::Cancelled => {
-                inner.metrics.increment_cancelled();
-                debug!("Task was cancelled during resource acquisition");
-                Err(TaskError::Cancelled)
-            }
-            SchedulingResult::Rejected(reason) => {
-                inner.metrics.increment_rejected();
-                debug!(reason, "Task was rejected by scheduler");
-                Err(TaskError::Failed(anyhow::anyhow!(
-                    "Task rejected: {}",
-                    reason
-                )))
-            }
-        };
+        }
+    }
 
-        inner.metrics.decrement_active();
-        final_result
+    /// Handle task errors through the error policy and return the action to take
+    async fn handle_task_error(
+        error: &anyhow::Error,
+        task_id: TaskId,
+        attempt_count: u32,
+        inner: &Arc<TaskTrackerInner>,
+    ) -> ActionResult {
+        // Get error response from policy
+        let response = inner.error_policy.on_error(error, task_id);
+
+        match response {
+            ErrorResponse::Continue => ActionResult::Continue,
+            ErrorResponse::Cancel => ActionResult::Cancel,
+            ErrorResponse::Custom(action) => {
+                debug!(?error, "Task failed - executing custom action");
+
+                // Create execution context for the action
+                let context = TaskExecutionContext {
+                    scheduler: inner.scheduler.clone(),
+                    metrics: inner.metrics.clone(),
+                };
+
+                // Execute the custom action asynchronously
+                let action_result = action
+                    .execute(error, task_id, attempt_count, &context)
+                    .await;
+                debug!(?action_result, "Custom action completed");
+
+                action_result
+            }
+        }
     }
 }
 
@@ -2191,21 +2487,13 @@ impl ArcPolicy for RateCancelPolicy {}
 
 /// Resource guard for unlimited scheduling
 ///
-/// This guard enforces that once task execution begins, it always runs to completion.
+/// This guard represents "unlimited" resources - no actual resource constraints.
+/// Since there are no resources to manage, this guard is essentially a no-op.
 #[derive(Debug)]
 pub struct UnlimitedGuard;
 
-#[async_trait]
 impl ResourceGuard for UnlimitedGuard {
-    async fn execute_task(
-        self: Box<Self>,
-        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
-    ) -> Result<()> {
-        debug!("Executing task with unlimited scheduler");
-        let result = task.await;
-        debug!("Task execution completed");
-        result
-    }
+    // No resources to manage - marker trait implementation only
 }
 
 /// Unlimited task scheduler that executes all tasks immediately
@@ -2271,21 +2559,8 @@ pub struct SemaphoreGuard {
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
 
-#[async_trait]
 impl ResourceGuard for SemaphoreGuard {
-    async fn execute_task(
-        self: Box<Self>,
-        task: Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>,
-    ) -> Result<()> {
-        debug!("Executing task with semaphore scheduler");
-
-        // Execute task while holding permit
-        let result = task.await;
-
-        debug!("Released semaphore permit");
-        // Permit is automatically dropped here, releasing the semaphore
-        result
-    }
+    // Permit is automatically released when the guard is dropped
 }
 
 /// Semaphore-based task scheduler
@@ -3198,10 +3473,16 @@ mod tests {
 
         // Test successful completion
         let (tx, rx) = tokio::sync::oneshot::channel();
-        let handle = tracker.spawn_cancellable(|_cancel_token| async move {
-            // Wait for signal instead of sleep
-            rx.await.ok();
-            CancellableTaskResult::Ok(42)
+        let rx = Arc::new(tokio::sync::Mutex::new(Some(rx)));
+        let handle = tracker.spawn_cancellable(move |_cancel_token| {
+            let rx = rx.clone();
+            async move {
+                // Wait for signal instead of sleep
+                if let Some(rx) = rx.lock().await.take() {
+                    rx.await.ok();
+                }
+                CancellableTaskResult::Ok(42)
+            }
         });
 
         // Signal task to complete
@@ -3213,10 +3494,18 @@ mod tests {
 
         // Test cancellation handling
         let (_tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let handle = tracker.spawn_cancellable(|cancel_token| async move {
-            tokio::select! {
-                _ = rx => CancellableTaskResult::Ok("should not complete"),
-                _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
+        let rx = Arc::new(tokio::sync::Mutex::new(Some(rx)));
+        let handle = tracker.spawn_cancellable(move |cancel_token| {
+            let rx = rx.clone();
+            async move {
+                tokio::select! {
+                    _ = async {
+                        if let Some(rx) = rx.lock().await.take() {
+                            rx.await.ok();
+                        }
+                    } => CancellableTaskResult::Ok("should not complete"),
+                    _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
+                }
             }
         });
 
@@ -3244,17 +3533,33 @@ mod tests {
         let (start_tx, start_rx) = tokio::sync::oneshot::channel::<()>();
         let (_continue_tx, continue_rx) = tokio::sync::oneshot::channel::<()>();
 
-        let handle = tracker.spawn_cancellable(|cancel_token| async move {
-            // Signal that we've started executing
-            start_tx.send(()).ok();
+        let start_tx_shared = Arc::new(tokio::sync::Mutex::new(Some(start_tx)));
+        let continue_rx_shared = Arc::new(tokio::sync::Mutex::new(Some(continue_rx)));
 
-            // Wait for either continuation signal or cancellation
-            tokio::select! {
-                _ = continue_rx => CancellableTaskResult::Ok("completed normally"),
-                _ = cancel_token.cancelled() => {
-                    println!("Task detected cancellation and is returning Cancelled");
-                    CancellableTaskResult::Cancelled
-                },
+        let start_tx_for_task = start_tx_shared.clone();
+        let continue_rx_for_task = continue_rx_shared.clone();
+
+        let handle = tracker.spawn_cancellable(move |cancel_token| {
+            let start_tx = start_tx_for_task.clone();
+            let continue_rx = continue_rx_for_task.clone();
+            async move {
+                // Signal that we've started executing
+                if let Some(tx) = start_tx.lock().await.take() {
+                    tx.send(()).ok();
+                }
+
+                // Wait for either continuation signal or cancellation
+                tokio::select! {
+                    _ = async {
+                        if let Some(rx) = continue_rx.lock().await.take() {
+                            rx.await.ok();
+                        }
+                    } => CancellableTaskResult::Ok("completed normally"),
+                    _ = cancel_token.cancelled() => {
+                        println!("Task detected cancellation and is returning Cancelled");
+                        CancellableTaskResult::Cancelled
+                    },
+                }
             }
         });
 
