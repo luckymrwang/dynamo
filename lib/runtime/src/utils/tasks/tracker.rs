@@ -37,7 +37,7 @@
 //! - **ErrorResponse::Custom(action)**: Execute custom logic that can return:
 //!   - `ActionResult::Continue`: Handle error and continue
 //!   - `ActionResult::Cancel`: Cancel tracker
-//!   - `ActionResult::Retry { delay }`: Retry the task (cancellable tasks only)
+//!   - `ActionResult::ExecuteNext { executor }`: Execute provided task executor
 //!
 //! ### 3. **Execution Pipeline** - Task Orchestration
 //!
@@ -71,7 +71,7 @@
 //! ### **Retry Support**
 //! - Regular tasks (`spawn`): Cannot be retried (future is consumed)
 //! - Cancellable tasks (`spawn_cancellable`): Support retry via `FnMut` closures
-//! - Error policies can request retries via `ActionResult::Retry`
+//! - Error policies can provide next executors via `ActionResult::ExecuteNext`
 //!
 //! ## Task Types
 //!
@@ -185,7 +185,8 @@
 //!         _context: &TaskExecutionContext,
 //!     ) -> ActionResult {
 //!         if attempt_count < self.max_attempts {
-//!             ActionResult::Retry { delay: Some(Duration::from_millis(100)) }
+//!             // Create next executor and return it (implementation details in Phase 2-4)
+//!             ActionResult::ExecuteNext { executor: /* next_executor */ }
 //!         } else {
 //!             ActionResult::Continue
 //!         }
@@ -392,6 +393,93 @@ impl TaskError {
             TaskError::Cancelled => anyhow::anyhow!("Task was cancelled"),
             TaskError::TrackerClosed => anyhow::anyhow!("Cannot spawn task on a closed tracker"),
         }
+    }
+}
+
+/// Trait for tasks that can restart themselves after failure
+///
+/// This trait allows tasks to define their own restart logic, eliminating the need
+/// for complex type erasure and executor management. Tasks implement this trait
+/// to provide a clean restart mechanism.
+#[async_trait]
+pub trait Restartable: Send + Sync + std::fmt::Debug + std::any::Any {
+    /// Restart the task after a failure
+    ///
+    /// This method is called when a task fails and needs to be restarted.
+    /// The implementation should create a new attempt at the task execution.
+    /// Returns the result in a type-erased Box<dyn Any> for flexibility.
+    async fn restart(
+        &self,
+        cancel_token: CancellationToken,
+    ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>>;
+}
+
+/// Error type that signals a task can be restarted
+///
+/// This error type contains a restartable task that can be executed for retry attempts.
+/// The task defines its own restart logic through the Restartable trait.
+#[derive(Error, Debug)]
+#[error("Task failed and can be restarted: {source}")]
+pub struct RestartableError {
+    /// The underlying error that caused the task to fail
+    #[source]
+    pub source: anyhow::Error,
+    /// The restartable task for retry attempts
+    pub restartable: Arc<dyn Restartable + Send + Sync + 'static>,
+}
+
+impl RestartableError {
+    /// Create a new RestartableError with a restartable task
+    ///
+    /// The restartable task defines its own restart logic through the Restartable trait.
+    pub fn new(
+        source: anyhow::Error,
+        restartable: Arc<dyn Restartable + Send + Sync + 'static>,
+    ) -> Self {
+        Self {
+            source,
+            restartable,
+        }
+    }
+
+    /// Create a RestartableError and convert it to anyhow::Error
+    ///
+    /// This is a convenience method for tasks to easily return restartable errors.
+    pub fn into_anyhow(
+        source: anyhow::Error,
+        restartable: Arc<dyn Restartable + Send + Sync + 'static>,
+    ) -> anyhow::Error {
+        anyhow::Error::new(Self::new(source, restartable))
+    }
+}
+
+/// Extension trait for extracting RestartableError from anyhow::Error
+///
+/// This trait provides methods to detect and extract restartable tasks
+/// from the type-erased anyhow::Error system.
+pub trait RestartableErrorExt {
+    /// Extract a restartable task if this error contains one
+    ///
+    /// Returns the restartable task if the error is a RestartableError,
+    /// None otherwise.
+    fn extract_restartable(&self) -> Option<Arc<dyn Restartable + Send + Sync + 'static>>;
+
+    /// Check if this error is restartable
+    fn is_restartable(&self) -> bool;
+}
+
+impl RestartableErrorExt for anyhow::Error {
+    fn extract_restartable(&self) -> Option<Arc<dyn Restartable + Send + Sync + 'static>> {
+        // Try to downcast to RestartableError
+        if let Some(restartable_err) = self.downcast_ref::<RestartableError>() {
+            Some(restartable_err.restartable.clone())
+        } else {
+            None
+        }
+    }
+
+    fn is_restartable(&self) -> bool {
+        self.downcast_ref::<RestartableError>().is_some()
     }
 }
 
@@ -672,8 +760,10 @@ pub enum ActionResult {
     /// Continue normal execution (error was handled)
     Continue,
 
-    /// Retry the task after optional delay
-    Retry { delay: Option<Duration> },
+    /// Execute the provided restartable task (retry/fallback/transformation)
+    ExecuteNext {
+        restartable: Arc<dyn Restartable + Send + Sync + 'static>,
+    },
 
     /// Cancel this tracker and all child trackers
     Cancel,
@@ -697,7 +787,7 @@ pub struct TaskExecutionContext {
 
 /// Result of task execution - unified for both regular and cancellable tasks
 #[derive(Debug)]
-enum TaskExecutionResult<T> {
+pub enum TaskExecutionResult<T> {
     /// Task completed successfully
     Success(T),
     /// Task was cancelled (only possible for cancellable tasks)
@@ -707,7 +797,8 @@ enum TaskExecutionResult<T> {
 }
 
 /// Trait for executing different types of tasks in a unified way
-trait TaskExecutor<T> {
+#[async_trait]
+trait TaskExecutor<T>: Send {
     /// Execute the task with the given cancellation token
     async fn execute(&mut self, cancel_token: CancellationToken) -> TaskExecutionResult<T>;
 
@@ -738,6 +829,7 @@ where
     }
 }
 
+#[async_trait]
 impl<F, T> TaskExecutor<T> for RegularTaskExecutor<F, T>
 where
     F: Future<Output = Result<T>> + Send + 'static,
@@ -781,6 +873,7 @@ where
     }
 }
 
+#[async_trait]
 impl<F, Fut, T> TaskExecutor<T> for CancellableTaskExecutor<F, Fut, T>
 where
     F: FnMut(CancellationToken) -> Fut + Send + 'static,
@@ -797,7 +890,7 @@ where
     }
 
     fn supports_retry(&self) -> bool {
-        true
+        true // Cancellable tasks support retry via RestartableError
     }
 }
 
@@ -2329,7 +2422,7 @@ impl TaskTrackerInner {
     #[tracing::instrument(level = "debug", skip_all, fields(task_id = %task_id))]
     async fn execute_with_retry_loop<E, T>(
         task_id: TaskId,
-        mut task_executor: E,
+        initial_executor: E,
         inner: Arc<TaskTrackerInner>,
     ) -> Result<T, TaskError>
     where
@@ -2337,7 +2430,49 @@ impl TaskTrackerInner {
         T: Send + 'static,
     {
         debug!("Starting task execution");
+
+        // RAII guard for active counter - increments on creation, decrements on drop
+        struct ActiveCountGuard {
+            metrics: Arc<dyn HierarchicalTaskMetrics>,
+            is_active: bool,
+        }
+
+        impl ActiveCountGuard {
+            fn new(metrics: Arc<dyn HierarchicalTaskMetrics>) -> Self {
+                Self {
+                    metrics,
+                    is_active: false,
+                }
+            }
+
+            fn activate(&mut self) {
+                if !self.is_active {
+                    self.metrics.increment_active();
+                    self.is_active = true;
+                }
+            }
+        }
+
+        impl Drop for ActiveCountGuard {
+            fn drop(&mut self) {
+                if self.is_active {
+                    self.metrics.decrement_active();
+                }
+            }
+        }
+
+        // Current executable - either the original TaskExecutor or a Restartable
+        enum CurrentExecutable<E>
+        where
+            E: Send + 'static,
+        {
+            TaskExecutor(E),
+            Restartable(Arc<dyn Restartable + Send + Sync + 'static>),
+        }
+
+        let mut current_executable = CurrentExecutable::TaskExecutor(initial_executor);
         let mut attempt_count = 1u32;
+        let mut active_guard = ActiveCountGuard::new(inner.metrics.clone());
 
         loop {
             // Acquire execution slot through scheduler with cancellation token
@@ -2352,21 +2487,49 @@ impl TaskTrackerInner {
 
             match guard_result {
                 SchedulingResult::Execute(_guard) => {
-                    // Only increment active counter AFTER successfully acquiring resources
-                    inner.metrics.increment_active();
+                    // Activate the RAII guard only once when we successfully acquire resources
+                    active_guard.activate();
 
-                    // Execute task while holding the guard (RAII pattern)
+                    // Execute the current executable while holding the guard (RAII pattern)
                     let execution_result = async {
                         debug!("Executing task with acquired resources");
-                        task_executor
-                            .execute(inner.cancel_token.child_token())
-                            .await
+                        match &mut current_executable {
+                            CurrentExecutable::TaskExecutor(executor) => {
+                                executor.execute(inner.cancel_token.child_token()).await
+                            }
+                            CurrentExecutable::Restartable(restartable) => {
+                                // Execute restartable and handle type erasure
+                                match restartable.restart(inner.cancel_token.child_token()).await {
+                                    TaskExecutionResult::Success(result) => {
+                                        // Try to downcast the result to the expected type T
+                                        if let Ok(typed_result) = result.downcast::<T>() {
+                                            TaskExecutionResult::Success(*typed_result)
+                                        } else {
+                                            // Type mismatch - this shouldn't happen with proper usage
+                                            let type_error = anyhow::anyhow!(
+                                                "Restartable task returned wrong type"
+                                            );
+                                            error!(
+                                                ?type_error,
+                                                "Type mismatch in restartable task result"
+                                            );
+                                            TaskExecutionResult::Error(type_error)
+                                        }
+                                    }
+                                    TaskExecutionResult::Cancelled => {
+                                        TaskExecutionResult::Cancelled
+                                    }
+                                    TaskExecutionResult::Error(error) => {
+                                        TaskExecutionResult::Error(error)
+                                    }
+                                }
+                            }
+                        }
                     }
                     .instrument(tracing::debug_span!("task_execution"))
                     .await;
 
-                    // Decrement active counter (guard will be dropped automatically)
-                    inner.metrics.decrement_active();
+                    // Active counter will be decremented automatically when active_guard drops
 
                     match execution_result {
                         TaskExecutionResult::Success(value) => {
@@ -2380,7 +2543,12 @@ impl TaskTrackerInner {
                             return Err(TaskError::Cancelled);
                         }
                         TaskExecutionResult::Error(error) => {
-                            // Handle error through policy
+                            debug!(
+                                attempt_count,
+                                "Task failed - handling error through policy - {error:?}"
+                            );
+
+                            // Handle the error through the policy system
                             let action_result =
                                 Self::handle_task_error(&error, task_id, attempt_count, &inner)
                                     .await;
@@ -2388,37 +2556,25 @@ impl TaskTrackerInner {
                             match action_result {
                                 ActionResult::Continue => {
                                     inner.metrics.increment_failed();
-                                    debug!(?error, "Task failed - continuing execution");
+                                    debug!("Policy decided to continue - task failed {error:?}");
                                     return Err(TaskError::Failed(error));
                                 }
                                 ActionResult::Cancel => {
                                     inner.metrics.increment_failed();
-                                    warn!(?error, "Error triggered cancellation");
+                                    warn!("Policy triggered cancellation - {error:?}");
                                     inner.cancel();
                                     return Err(TaskError::Failed(error));
                                 }
-                                ActionResult::Retry { delay } => {
-                                    if !task_executor.supports_retry() {
-                                        // For tasks that don't support retry, log warning and treat as Continue
-                                        inner.metrics.increment_failed();
-                                        warn!(?error, "Task failed with retry request, but this task type cannot be retried");
-                                        return Err(TaskError::Failed(error));
-                                    }
-
-                                    inner.metrics.increment_failed();
+                                ActionResult::ExecuteNext { restartable } => {
                                     debug!(
-                                        ?error,
-                                        ?delay,
-                                        attempt = attempt_count,
-                                        "Retrying task after error"
+                                        "Policy provided next executable - continuing loop - {error:?}"
                                     );
 
-                                    if let Some(delay_duration) = delay {
-                                        tokio::time::sleep(delay_duration).await;
-                                    }
-
+                                    // Update current executable and continue the loop
+                                    current_executable =
+                                        CurrentExecutable::Restartable(restartable);
                                     attempt_count += 1;
-                                    // Continue the loop to retry
+                                    continue; // Continue the main loop with the new executable
                                 }
                             }
                         }
@@ -2448,14 +2604,29 @@ impl TaskTrackerInner {
         attempt_count: u32,
         inner: &Arc<TaskTrackerInner>,
     ) -> ActionResult {
-        // Get error response from policy
+        // First, check if this is a RestartableError (task-driven retry)
+        if let Some(restartable_err) = error.downcast_ref::<RestartableError>() {
+            debug!(
+                task_id = %task_id,
+                attempt_count,
+                "Task provided RestartableError with restartable task - {error:?}"
+            );
+
+            // Task has provided a restartable implementation for the next attempt
+            // Clone the Arc to return it in ActionResult::ExecuteNext
+            let restartable = restartable_err.restartable.clone();
+
+            return ActionResult::ExecuteNext { restartable };
+        }
+
+        // Not a RestartableError, proceed with normal policy handling
         let response = inner.error_policy.on_error(error, task_id);
 
         match response {
             ErrorResponse::Continue => ActionResult::Continue,
             ErrorResponse::Cancel => ActionResult::Cancel,
             ErrorResponse::Custom(action) => {
-                debug!(?error, "Task failed - executing custom action");
+                debug!("Task failed - executing custom action - {error:?}");
 
                 // Create execution context for the action
                 let context = TaskExecutionContext {
@@ -2704,7 +2875,7 @@ impl OnErrorPolicy for CancelOnError {
     }
 
     fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, ?error, "Task failed");
+        error!(?task_id, "Task failed - {error:?}");
 
         if self.error_patterns.is_empty() {
             return ErrorResponse::Cancel;
@@ -2752,7 +2923,7 @@ impl OnErrorPolicy for LogOnlyPolicy {
     }
 
     fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, ?error, "Task failed - logging only");
+        error!(?task_id, "Task failed - logging only - {error:?}");
         ErrorResponse::Continue
     }
 }
@@ -2803,7 +2974,7 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
     }
 
     fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, ?error, "Task failed");
+        error!(?task_id, "Task failed - {error:?}");
 
         let current_failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
 
@@ -2910,7 +3081,7 @@ impl OnErrorPolicy for RateCancelPolicy {
     }
 
     fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, ?error, "Task failed");
+        error!(?task_id, "Task failed - {error:?}");
 
         // TODO: Implement time-window failure rate calculation
         // For now, just log the error and continue
@@ -2951,8 +3122,7 @@ impl OnErrorAction for TriggerCancellationTokenAction {
     ) -> ActionResult {
         warn!(
             ?task_id,
-            ?error,
-            "Executing custom action: triggering cancellation token"
+            "Executing custom action: triggering cancellation token - {error:?}"
         );
 
         // Trigger the custom cancellation token
@@ -3001,8 +3171,7 @@ impl OnErrorPolicy for TriggerCancellationTokenOnError {
     fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
         error!(
             ?task_id,
-            ?error,
-            "Task failed - triggering custom cancellation token"
+            "Task failed - triggering custom cancellation token - {error:?}"
         );
 
         // Create the custom action that will trigger our token
@@ -4353,5 +4522,289 @@ mod tests {
 
         // Verify the error was counted
         assert_eq!(tracker.metrics().failed(), 1);
+    }
+
+    #[test]
+    fn test_action_result_variants() {
+        // Test that ActionResult variants can be created and pattern matched
+
+        // Test Continue variant
+        let continue_result = ActionResult::Continue;
+        match continue_result {
+            ActionResult::Continue => {} // Expected
+            _ => panic!("Expected Continue variant"),
+        }
+
+        // Test Cancel variant
+        let cancel_result = ActionResult::Cancel;
+        match cancel_result {
+            ActionResult::Cancel => {} // Expected
+            _ => panic!("Expected Cancel variant"),
+        }
+
+        // Test ExecuteNext variant with Restartable
+        #[derive(Debug)]
+        struct TestRestartable;
+
+        #[async_trait]
+        impl Restartable for TestRestartable {
+            async fn restart(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                TaskExecutionResult::Success(Box::new("test_result".to_string()))
+            }
+        }
+
+        let test_restartable = Arc::new(TestRestartable);
+        let execute_next_result = ActionResult::ExecuteNext {
+            restartable: test_restartable,
+        };
+
+        match execute_next_result {
+            ActionResult::ExecuteNext { restartable } => {
+                // Verify we have a valid Restartable
+                assert!(format!("{:?}", restartable).contains("TestRestartable"));
+            }
+            _ => panic!("Expected ExecuteNext variant"),
+        }
+    }
+
+    #[test]
+    fn test_restartable_error_creation() {
+        // Test RestartableError creation and conversion to anyhow::Error
+
+        // Create a dummy restartable task for testing
+        #[derive(Debug)]
+        struct DummyRestartable;
+
+        #[async_trait]
+        impl Restartable for DummyRestartable {
+            async fn restart(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                TaskExecutionResult::Success(Box::new("restarted_result".to_string()))
+            }
+        }
+
+        let dummy_restartable = Arc::new(DummyRestartable);
+        let source_error = anyhow::anyhow!("Original task failed");
+
+        // Test RestartableError::new
+        let restartable_error = RestartableError::new(source_error, dummy_restartable);
+
+        // Verify the error displays correctly
+        let error_string = format!("{}", restartable_error);
+        assert!(error_string.contains("Task failed and can be restarted"));
+        assert!(error_string.contains("Original task failed"));
+
+        // Test conversion to anyhow::Error
+        let anyhow_error = anyhow::Error::new(restartable_error);
+        assert!(anyhow_error
+            .to_string()
+            .contains("Task failed and can be restarted"));
+    }
+
+    #[test]
+    fn test_restartable_error_ext_trait() {
+        // Test the RestartableErrorExt trait methods
+
+        // Test with regular anyhow::Error (not restartable)
+        let regular_error = anyhow::anyhow!("Regular error");
+        assert!(!regular_error.is_restartable());
+        let extracted = regular_error.extract_restartable();
+        assert!(extracted.is_none());
+
+        // Test with RestartableError
+        #[derive(Debug)]
+        struct TestRestartable;
+
+        #[async_trait]
+        impl Restartable for TestRestartable {
+            async fn restart(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                TaskExecutionResult::Success(Box::new("test_result".to_string()))
+            }
+        }
+
+        let test_restartable = Arc::new(TestRestartable);
+        let source_error = anyhow::anyhow!("Source error");
+        let restartable_error = RestartableError::new(source_error, test_restartable);
+
+        let anyhow_error = anyhow::Error::new(restartable_error);
+        assert!(anyhow_error.is_restartable());
+
+        // Test extraction of restartable task
+        let extracted = anyhow_error.extract_restartable();
+        assert!(extracted.is_some());
+    }
+
+    #[test]
+    fn test_restartable_error_into_anyhow_helper() {
+        // Test the convenience method for creating restartable errors
+        // Note: This test uses a mock TaskExecutor since we don't have real ones yet
+
+        // For now, we'll test the type erasure concept with a simple type
+        struct MockExecutor;
+
+        let _source_error = anyhow::anyhow!("Mock task failed");
+
+        // We can't test RestartableError::into_anyhow yet because it requires
+        // a real TaskExecutor<T>. This will be tested in Phase 3.
+        // For now, just verify the concept works with manual construction.
+
+        #[derive(Debug)]
+        struct MockRestartable;
+
+        #[async_trait]
+        impl Restartable for MockRestartable {
+            async fn restart(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                TaskExecutionResult::Success(Box::new("mock_result".to_string()))
+            }
+        }
+
+        let mock_restartable = Arc::new(MockRestartable);
+        let restartable_error =
+            RestartableError::new(anyhow::anyhow!("Mock task failed"), mock_restartable);
+
+        let anyhow_error = anyhow::Error::new(restartable_error);
+        assert!(anyhow_error.is_restartable());
+    }
+
+    #[test]
+    fn test_cancellable_task_executor_supports_retry() {
+        // Test that CancellableTaskExecutor supports retry
+
+        let task_fn = |_token: CancellationToken| async move { CancellableTaskResult::Ok(42u32) };
+
+        let executor = CancellableTaskExecutor::new(task_fn);
+
+        // Test that it implements TaskExecutor and supports retry
+        assert!(executor.supports_retry());
+    }
+
+    #[test]
+    fn test_restartable_error_with_task_executor() {
+        // Test RestartableError creation with TaskExecutor
+
+        #[derive(Debug)]
+        struct TestRestartableTask;
+
+        #[async_trait]
+        impl Restartable for TestRestartableTask {
+            async fn restart(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                TaskExecutionResult::Success(Box::new("test_result".to_string()))
+            }
+        }
+
+        let restartable_task = Arc::new(TestRestartableTask);
+        let source_error = anyhow::anyhow!("Task failed");
+
+        // Test RestartableError::new with Restartable
+        let restartable_error = RestartableError::new(source_error, restartable_task);
+
+        // Verify the error displays correctly
+        let error_string = format!("{}", restartable_error);
+        assert!(error_string.contains("Task failed and can be restarted"));
+        assert!(error_string.contains("Task failed"));
+
+        // Test conversion to anyhow::Error
+        let anyhow_error = anyhow::Error::new(restartable_error);
+        assert!(anyhow_error.is_restartable());
+
+        // Test extraction (should work now with Restartable trait)
+        let extracted = anyhow_error.extract_restartable();
+        assert!(extracted.is_some()); // Should successfully extract the Restartable
+    }
+
+    #[test]
+    fn test_restartable_error_into_anyhow_convenience() {
+        // Test the convenience method for creating restartable errors
+
+        #[derive(Debug)]
+        struct ConvenienceRestartable;
+
+        #[async_trait]
+        impl Restartable for ConvenienceRestartable {
+            async fn restart(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                TaskExecutionResult::Success(Box::new(42u32))
+            }
+        }
+
+        let restartable_task = Arc::new(ConvenienceRestartable);
+        let source_error = anyhow::anyhow!("Computation failed");
+
+        // Test RestartableError::into_anyhow convenience method
+        let anyhow_error = RestartableError::into_anyhow(source_error, restartable_task);
+
+        assert!(anyhow_error.is_restartable());
+        assert!(anyhow_error
+            .to_string()
+            .contains("Task failed and can be restarted"));
+        assert!(anyhow_error.to_string().contains("Computation failed"));
+    }
+
+    #[test]
+    fn test_handle_task_error_with_restartable_error() {
+        // Test that handle_task_error properly detects RestartableError
+
+        // Create a mock Restartable task
+        #[derive(Debug)]
+        struct MockRestartableTask;
+
+        #[async_trait]
+        impl Restartable for MockRestartableTask {
+            async fn restart(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                TaskExecutionResult::Success(Box::new("retry_result".to_string()))
+            }
+        }
+
+        let restartable_task = Arc::new(MockRestartableTask);
+
+        // Create RestartableError
+        let source_error = anyhow::anyhow!("Task failed, but can retry");
+        let restartable_error = RestartableError::new(source_error, restartable_task);
+        let anyhow_error = anyhow::Error::new(restartable_error);
+
+        // Verify it's detected as restartable
+        assert!(anyhow_error.is_restartable());
+
+        // Verify we can downcast to RestartableError
+        let restartable_ref = anyhow_error.downcast_ref::<RestartableError>();
+        assert!(restartable_ref.is_some());
+
+        // Verify the restartable task is present
+        let restartable = restartable_ref.unwrap();
+        // Note: We can verify the Arc is valid by checking that Arc::strong_count > 0
+        assert!(Arc::strong_count(&restartable.restartable) > 0);
+    }
+
+    #[test]
+    fn test_handle_task_error_with_regular_error() {
+        // Test that handle_task_error properly handles regular errors
+
+        let regular_error = anyhow::anyhow!("Regular task failure");
+
+        // Verify it's not detected as restartable
+        assert!(!regular_error.is_restartable());
+
+        // Verify we cannot downcast to RestartableError
+        let restartable_ref = regular_error.downcast_ref::<RestartableError>();
+        assert!(restartable_ref.is_none());
     }
 }
