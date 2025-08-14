@@ -24,6 +24,7 @@ use crate::{
 };
 
 use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
+use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
 use figment::error;
@@ -39,11 +40,22 @@ impl MetricsRegistry for DistributedRuntime {
     fn parent_hierarchy(&self) -> Vec<String> {
         vec![] // drt is the root, so no parent hierarchy
     }
+
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        // Convert Vec<(String, String)> to Vec<(&str, &str)>
+        self.labels
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect()
+    }
+
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)> {
+        &mut self.labels
+    }
 }
 
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
-        let secondary = runtime.secondary();
         let (etcd_config, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
@@ -51,32 +63,12 @@ impl DistributedRuntime {
         let etcd_client = if is_static {
             None
         } else {
-            Some(
-                secondary
-                    .spawn(async move {
-                        let client = etcd::Client::new(etcd_config.clone(), runtime_clone)
-                            .await
-                            .context(format!(
-                                "Failed to connect to etcd server with config {:?}",
-                                etcd_config
-                            ))?;
-                        OK(client)
-                    })
-                    .await??,
-            )
+            Some(etcd::Client::new(etcd_config.clone(), runtime_clone).await?)
         };
 
-        let nats_client = secondary
-            .spawn(async move {
-                let client = nats_config.clone().connect().await.context(format!(
-                    "Failed to connect to NATS server with config {:?}",
-                    nats_config
-                ))?;
-                anyhow::Ok(client)
-            })
-            .await??;
+        let nats_client = nats_config.clone().connect().await?;
 
-        // Start HTTP server for health and metrics if enabled in configuration
+        // Start system status server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
         // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
@@ -87,9 +79,13 @@ impl DistributedRuntime {
         };
         let starting_health_status = config.starting_health_status.clone();
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
-        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+        let health_endpoint_path = config.system_health_path.clone();
+        let live_endpoint_path = config.system_live_path.clone();
+        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
+            health_endpoint_path,
+            live_endpoint_path,
         )));
 
         let distributed_runtime = Self {
@@ -97,6 +93,7 @@ impl DistributedRuntime {
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            system_status_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -105,15 +102,16 @@ impl DistributedRuntime {
                 prometheus::Registry,
             >::new())),
             system_health,
+            labels: Vec::new(),
         };
 
-        // Start HTTP server if enabled
+        // Start system status server if enabled
         if let Some(cancel_token) = cancel_token {
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start HTTP server (it spawns its own task internally)
-            match crate::http_server::spawn_http_server(
+            // Start system status server (it spawns its own task internally)
+            match crate::system_status_server::spawn_system_status_server(
                 &host,
                 port,
                 cancel_token,
@@ -121,15 +119,28 @@ impl DistributedRuntime {
             )
             .await
             {
-                Ok((addr, _)) => {
-                    tracing::info!("HTTP server started successfully on {}", addr);
+                Ok((addr, handle)) => {
+                    tracing::info!("System status server started successfully on {}", addr);
+
+                    // Store system status server information
+                    let system_status_server_info =
+                        crate::system_status_server::SystemStatusServerInfo::new(
+                            addr,
+                            Some(handle),
+                        );
+
+                    // Initialize the system_status_server field
+                    distributed_runtime
+                        .system_status_server
+                        .set(Arc::new(system_status_server_info))
+                        .expect("System status server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("HTTP server startup failed: {}", e);
+                    tracing::error!("System status server startup failed: {}", e);
                 }
             }
         } else {
-            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
+            tracing::debug!("Health and system status server is disabled via DYN_SYSTEM_ENABLED");
         }
 
         Ok(distributed_runtime)
@@ -208,6 +219,13 @@ impl DistributedRuntime {
 
     pub fn nats_client(&self) -> nats::Client {
         self.nats_client.clone()
+    }
+
+    /// Get system status server information if available
+    pub fn system_status_server_info(
+        &self,
+    ) -> Option<Arc<crate::system_status_server::SystemStatusServerInfo>> {
+        self.system_status_server.get().cloned()
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers

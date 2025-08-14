@@ -26,6 +26,7 @@ from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
 from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import KvStats as KvStats
+from dynamo._core import ModelRuntimeConfig as ModelRuntimeConfig
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import RadixTree as RadixTree
@@ -41,17 +42,3 @@ from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for
 from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
 from dynamo._core import run_input
-
-try:
-    from dynamo.llm.tensorrtllm import (  # noqa: F401
-        get_llm_engine as get_tensorrtllm_engine,
-    )
-    from dynamo.llm.tensorrtllm import (  # noqa: F401
-        get_publisher as get_tensorrtllm_publisher,
-    )
-except ImportError:
-    pass  # TensorRTLLM is not enabled by default
-except Exception as e:
-    # Don't let TensorRTLLM break other engines
-    logger = logging.getLogger(__name__)
-    logger.exception(f"Error importing TensorRT-LLM components: {e}")

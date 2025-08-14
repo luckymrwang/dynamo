@@ -26,6 +26,7 @@ type ResourceItem struct {
 	CPU    string            `json:"cpu,omitempty"`
 	Memory string            `json:"memory,omitempty"`
 	GPU    string            `json:"gpu,omitempty"`
+	Nodes  string            `json:"nodes,omitempty"`
 	Custom map[string]string `json:"custom,omitempty"`
 }
 
@@ -54,13 +55,6 @@ type ExtraPodMetadata struct {
 }
 
 type ExtraPodSpec struct {
-	SchedulerName             string                            `json:"schedulerName,omitempty"`
-	NodeSelector              map[string]string                 `json:"nodeSelector,omitempty"`
-	Affinity                  *corev1.Affinity                  `json:"affinity,omitempty"`
-	Tolerations               []corev1.Toleration               `json:"tolerations,omitempty"`
-	TopologySpreadConstraints []corev1.TopologySpreadConstraint `json:"topologySpreadConstraints,omitempty"`
-	Containers                []corev1.Container                `json:"containers,omitempty"`
-	ServiceAccountName        string                            `json:"serviceAccountName,omitempty"`
-	PriorityClassName         string                            `json:"priorityClassName,omitempty"`
-	MainContainer             *corev1.Container                 `json:"mainContainer,omitempty"`
+	*corev1.PodSpec `json:",inline"`
+	MainContainer   *corev1.Container `json:"mainContainer,omitempty"`
 }

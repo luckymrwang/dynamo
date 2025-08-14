@@ -16,36 +16,68 @@
 //! Metric Registry Framework for Dynamo.
 //!
 //! This module provides registry classes for Prometheus metrics
-//! that auto populates the labels with the namespace-component-endpoint hierarchy.
+//! that auto populates the labels with the component-endpoint hierarchy.
+//! All metrics are prefixed with "dynamo_component_" to avoid collisions with Kubernetes and other monitoring system labels.
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// This constant determines whether metric names should include the full hierarchy as a prefix.
-// If set to true, a hierarchy like ["", "mynamespace", "mycomponent", "myendpoint"]
-// results in a metric name of "mynamespace_mycomponent_myendpoint__myendpoint".
-// If false, the metric name will be just "myendpoint".
-// This setting is applied *universally* to ensure consistent naming conventions.
-pub const USE_PREFIXED_METRIC_NAMES: bool = false;
-
-// If set to true, then metrics will be labeled with the namespace, component, and endpoint.
+// If set to true, then metrics will be labeled with the dynamo_namespace, dynamo_component, and dynamo_endpoint.
+// These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and other monitoring system labels.
 pub const USE_AUTO_LABELS: bool = true;
 
 // Prometheus imports
 use prometheus::Encoder;
 
-fn build_metric_name(prefix: &str, metric_name: &str) -> String {
-    if !USE_PREFIXED_METRIC_NAMES {
-        return metric_name.to_string();
+fn build_metric_name(metric_name: &str) -> String {
+    format!("dynamo_component_{}", metric_name)
+}
+
+/// Lints a metric name component by stripping off invalid characters and validating Prometheus naming pattern
+/// Prometheus doesn't provide a built-in function to validate metric names, but the specification requires
+/// names to follow the pattern [a-zA-Z_:][a-zA-Z0-9_:]*. This function implements that validation.
+/// Returns error if sanitized name doesn't follow the required pattern.
+fn lint_prometheus_name(name: &str) -> anyhow::Result<String> {
+    if name.is_empty() {
+        return Ok("".to_string());
     }
 
-    if prefix.is_empty() {
-        metric_name.to_string()
-    } else {
-        // Double underscore to separate between prefix and actual metric name
-        format!("{}__{}", prefix, metric_name)
+    static INVALID_CHARS_PATTERN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
+
+    static PROMETHEUS_NAME_PATTERN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$").unwrap());
+
+    // Remove all invalid characters (everything except alphanumeric, colons, and underscores)
+    let sanitized = INVALID_CHARS_PATTERN.replace_all(name, "").to_string();
+
+    // Check if the sanitized name follows Prometheus naming pattern
+    if !sanitized.is_empty() && !PROMETHEUS_NAME_PATTERN.is_match(&sanitized) {
+        return Err(anyhow::anyhow!(
+            "Sanitized name '{}' does not follow Prometheus naming pattern [a-zA-Z_:][a-zA-Z0-9_:]*",
+            sanitized
+        ));
     }
+
+    Ok(sanitized)
+}
+
+/// Validate that a label slice has no duplicate keys.
+/// Returns Ok(()) when all keys are unique; otherwise returns an error naming the duplicate key.
+fn validate_no_duplicate_label_keys(labels: &[(&str, &str)]) -> anyhow::Result<()> {
+    let mut seen_keys = std::collections::HashSet::new();
+    for (key, _) in labels {
+        if !seen_keys.insert(*key) {
+            return Err(anyhow::anyhow!(
+                "Duplicate label key '{}' found in labels",
+                key
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Trait that defines common behavior for Prometheus metric types
@@ -120,6 +152,21 @@ impl PrometheusMetric for prometheus::IntGaugeVec {
     }
 }
 
+impl PrometheusMetric for prometheus::IntCounterVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "IntCounterVec requires label names, use with_opts_and_label_names instead".to_string(),
+        ))
+    }
+
+    fn with_opts_and_label_names(
+        opts: prometheus::Opts,
+        label_names: &[&str],
+    ) -> Result<Self, prometheus::Error> {
+        prometheus::IntCounterVec::new(opts, label_names)
+    }
+}
+
 // Implement the trait for Histogram
 impl PrometheusMetric for prometheus::Histogram {
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
@@ -162,32 +209,35 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     labels: &[(&str, &str)],
     buckets: Option<Vec<f64>>,
     const_labels: Option<&[&str]>,
-) -> anyhow::Result<Arc<T>> {
+) -> anyhow::Result<T> {
     // Validate that user-provided labels don't have duplicate keys
-    let mut seen_keys = std::collections::HashSet::new();
-
-    let basename = registry.basename();
-    let metric_name = build_metric_name(&registry.prefix(), metric_name);
-    let parent_hierarchy = registry.parent_hierarchy();
-
-    // Validate that user-provided labels don't have duplicate keys
-    for (key, _) in labels {
-        if !seen_keys.insert(*key) {
+    validate_no_duplicate_label_keys(labels)?;
+    // Validate that user-provided labels don't conflict with stored labels
+    for (key, _) in registry.stored_labels() {
+        if labels.iter().any(|(k, _)| *k == key) {
             return Err(anyhow::anyhow!(
-                "Duplicate label key '{}' found in labels",
+                "Label key '{}' already exists in registry.",
                 key
             ));
         }
     }
 
-    let hierarchy = [parent_hierarchy, vec![basename]].concat();
-    // Build updated_labels: auto-labels first, then user labels
+    let basename = registry.basename();
+    let parent_hierarchy = registry.parent_hierarchy();
+
+    // Build hierarchy: parent_hierarchy + [basename]
+    let hierarchy = [parent_hierarchy.clone(), vec![basename.clone()]].concat();
+
+    let metric_name = build_metric_name(metric_name);
+
+    // Build updated_labels: auto-labels first, then `labels` + stored labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
     if USE_AUTO_LABELS {
         // Validate that user-provided labels don't conflict with auto-generated labels
         for (key, _) in labels {
-            if *key == "namespace" || *key == "component" || *key == "endpoint" {
+            if *key == "dynamo_namespace" || *key == "dynamo_component" || *key == "dynamo_endpoint"
+            {
                 return Err(anyhow::anyhow!(
                     "Label '{}' is automatically added by auto_label feature and cannot be manually set",
                     key
@@ -195,23 +245,32 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
             }
         }
 
-        // Add auto-generated labels
+        // Add auto-generated labels with sanitized values
         if hierarchy.len() > 1 {
             let namespace = &hierarchy[1];
             if !namespace.is_empty() {
-                updated_labels.push(("namespace".to_string(), namespace.clone()));
+                let valid_namespace = lint_prometheus_name(namespace)?;
+                if !valid_namespace.is_empty() {
+                    updated_labels.push(("dynamo_namespace".to_string(), valid_namespace));
+                }
             }
         }
         if hierarchy.len() > 2 {
             let component = &hierarchy[2];
             if !component.is_empty() {
-                updated_labels.push(("component".to_string(), component.clone()));
+                let valid_component = lint_prometheus_name(component)?;
+                if !valid_component.is_empty() {
+                    updated_labels.push(("dynamo_component".to_string(), valid_component));
+                }
             }
         }
         if hierarchy.len() > 3 {
             let endpoint = &hierarchy[3];
             if !endpoint.is_empty() {
-                updated_labels.push(("endpoint".to_string(), endpoint.clone()));
+                let valid_endpoint = lint_prometheus_name(endpoint)?;
+                if !valid_endpoint.is_empty() {
+                    updated_labels.push(("dynamo_endpoint".to_string(), valid_endpoint));
+                }
             }
         }
     }
@@ -222,9 +281,18 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
             .iter()
             .map(|(k, v)| ((*k).to_string(), (*v).to_string())),
     );
+    // Add stored labels (safe because overlaps were rejected above)
+    updated_labels.extend(
+        registry
+            .stored_labels()
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string())),
+    );
 
     // Handle different metric types
-    let metric = if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::Histogram>() {
+    let prometheus_metric = if std::any::TypeId::of::<T>()
+        == std::any::TypeId::of::<prometheus::Histogram>()
+    {
         // Special handling for Histogram with custom buckets
         // buckets parameter is valid for Histogram, const_labels is not used
         if const_labels.is_some() {
@@ -267,6 +335,21 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("IntGaugeVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
+        // Special handling for IntCounterVec with label names
+        // const_labels parameter is required for IntCounterVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for IntCounterVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
     } else {
         // Standard handling for Counter, IntCounter, Gauge, IntGauge
         // buckets and const_labels parameters are not valid for these types
@@ -288,7 +371,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     };
 
     // Iterate over the DRT's registry and register this metric across all hierarchical levels.
-    // The prefixed_hierarchy is structured as: ["", "mynamespace", "mynamespace_mycomponent", "mynamespace_mycomponent_myendpoint"]
+    // The prefixed_hierarchy is structured as: ["", "testnamespace", "testnamespace_testcomponent", "testnamespace_testcomponent_testendpoint"]
     // This prefixing is essential to differentiate between the names of children and grandchildren.
     let mut prometheus_registry = registry
         .drt()
@@ -298,10 +381,10 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 
     // Build prefixed hierarchy and register metrics in a single loop
     // current_prefix accumulates the hierarchical path as we iterate through hierarchy
-    // For example, if hierarchy = ["", "mynamespace", "mycomponent"], then:
+    // For example, if hierarchy = ["", "testnamespace", "testcomponent"], then:
     // - Iteration 1: current_prefix = "" (empty string from DRT)
-    // - Iteration 2: current_prefix = "mynamespace"
-    // - Iteration 3: current_prefix = "mynamespace_mycomponent"
+    // - Iteration 2: current_prefix = "testnamespace"
+    // - Iteration 3: current_prefix = "testnamespace_testcomponent"
     let mut current_prefix = String::new();
     for name in &hierarchy {
         if !current_prefix.is_empty() && !name.is_empty() {
@@ -310,14 +393,14 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         current_prefix.push_str(name);
 
         // Register metric at this hierarchical level
-        let collector: Box<dyn prometheus::core::Collector> = Box::new(metric.clone());
+        let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
         let _ = prometheus_registry
             .entry(current_prefix.clone())
             .or_default()
             .register(collector);
     }
 
-    Ok(Arc::new(metric))
+    Ok(prometheus_metric)
 }
 
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
@@ -326,6 +409,47 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvider {
     // Get the name of this registry (without any prefix)
     fn basename(&self) -> String;
+
+    /// Get any stored labels for this registry
+    fn stored_labels(&self) -> Vec<(&str, &str)> {
+        Vec::new()
+    }
+
+    /// Get mutable access to the labels storage - implementors must provide this
+    fn labels_mut(&mut self) -> &mut Vec<(String, String)>;
+
+    /// Add labels to this registry and return a new instance with the labels.
+    ///   This allows for method chaining like: runtime.namespace(...).add_labels(...)?
+    /// Fails if:
+    /// - Provided `labels` contains duplicate keys, or
+    /// - Any provided key already exists in the registry's stored labels.
+    fn add_labels(mut self, labels: &[(&str, &str)]) -> anyhow::Result<Self>
+    where
+        Self: Sized,
+    {
+        validate_no_duplicate_label_keys(labels)?;
+
+        // 2) Validate no overlap with existing stored labels
+        let existing: std::collections::HashSet<&str> =
+            self.stored_labels().into_iter().map(|(k, _)| k).collect();
+        if let Some(conflict) = labels
+            .iter()
+            .map(|(k, _)| *k)
+            .find(|k| existing.contains(k))
+        {
+            return Err(anyhow::anyhow!(
+                "Label key '{}' already exists in registry; refusing to overwrite",
+                conflict
+            ));
+        }
+
+        // 3) Safe to append
+        let labels_storage = self.labels_mut();
+        for (key, value) in labels {
+            labels_storage.push((key.to_string(), value.to_string()));
+        }
+        Ok(self)
+    }
 
     /// Retrieve the complete hierarchy and basename for this registry. Currently, the prefix for drt is an empty string,
     /// so we must account for the leading underscore. The existing code remains unchanged to accommodate any future
@@ -344,17 +468,19 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
     // TODO: Add support for additional Prometheus metric types:
     // - Counter: ✅ IMPLEMENTED - create_counter()
     // - CounterVec: ✅ IMPLEMENTED - create_countervec()
-    // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
     // - Gauge: ✅ IMPLEMENTED - create_gauge()
-    // - IntGauge/IntGaugeVec: ✅ IMPLEMENTED - create_intgauge() and create_intgaugevec()
+    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
     // - Histogram: ✅ IMPLEMENTED - create_histogram()
-    // - Summary: create_summary() - for quantiles and sum/count metrics
     // - HistogramVec with custom buckets: create_histogram_with_buckets()
+    // - Info: create_info() - for info metrics with labels
+    // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
+    // - IntCounterVec: ✅ IMPLEMENTED - create_intcountervec()
+    // - IntGauge: ✅ IMPLEMENTED - create_intgauge()
+    // - IntGaugeVec: ✅ IMPLEMENTED - create_intgaugevec()
+    // - Stateset: create_stateset() - for state-based metrics
+    // - Summary: create_summary() - for quantiles and sum/count metrics
     // - SummaryVec: create_summary_vec() - for labeled summaries
     // - Untyped: create_untyped() - for untyped metrics
-    // - Info: create_info() - for info metrics with labels
-    // - Stateset: create_stateset() - for state-based metrics
-    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
 
     /// Create a Counter metric
     fn create_counter(
@@ -362,8 +488,26 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::Counter>> {
+    ) -> anyhow::Result<prometheus::Counter> {
         create_metric(self, name, description, labels, None, None)
+    }
+
+    /// Create a CounterVec metric with label names (for dynamic labels)
+    fn create_countervec(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::CounterVec> {
+        create_metric(
+            self,
+            name,
+            description,
+            const_label_values,
+            None,
+            Some(const_labels),
+        )
     }
 
     /// Create a Gauge metric
@@ -372,17 +516,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::Gauge>> {
-        create_metric(self, name, description, labels, None, None)
-    }
-
-    /// Create an IntCounter metric
-    fn create_intcounter(
-        &self,
-        name: &str,
-        description: &str,
-        labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntCounter>> {
+    ) -> anyhow::Result<prometheus::Gauge> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -393,18 +527,28 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
         buckets: Option<Vec<f64>>,
-    ) -> anyhow::Result<Arc<prometheus::Histogram>> {
+    ) -> anyhow::Result<prometheus::Histogram> {
         create_metric(self, name, description, labels, buckets, None)
     }
 
-    /// Create a CounterVec metric with label names (for dynamic labels)
-    fn create_countervec(
+    /// Create an IntCounter metric
+    fn create_intcounter(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<prometheus::IntCounter> {
+        create_metric(self, name, description, labels, None, None)
+    }
+
+    /// Create an IntCounterVec metric with label names (for dynamic labels)
+    fn create_intcountervec(
         &self,
         name: &str,
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::CounterVec>> {
+    ) -> anyhow::Result<prometheus::IntCounterVec> {
         create_metric(
             self,
             name,
@@ -421,7 +565,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntGauge>> {
+    ) -> anyhow::Result<prometheus::IntGauge> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -432,7 +576,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntGaugeVec>> {
+    ) -> anyhow::Result<prometheus::IntGaugeVec> {
         create_metric(
             self,
             name,
@@ -469,13 +613,98 @@ pub fn create_test_drt() -> crate::DistributedRuntime {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_metric_name_with_prefix() {
+        // Test that build_metric_name correctly prepends the dynamo_component prefix
+        let result = build_metric_name("requests");
+        assert_eq!(result, "dynamo_component_requests");
+
+        let result = build_metric_name("counter");
+        assert_eq!(result, "dynamo_component_counter");
+    }
+
+    #[test]
+    fn test_lint_prometheus_name() {
+        // Test that valid components remain unchanged
+        assert_eq!(
+            lint_prometheus_name("testnamespace").unwrap(),
+            "testnamespace"
+        );
+        assert_eq!(
+            lint_prometheus_name("test_namespace").unwrap(),
+            "test_namespace"
+        );
+        assert_eq!(lint_prometheus_name("test123").unwrap(), "test123");
+        assert_eq!(
+            lint_prometheus_name("test:namespace").unwrap(),
+            "test:namespace"
+        );
+        assert_eq!(
+            lint_prometheus_name("_testnamespace").unwrap(),
+            "_testnamespace"
+        );
+        assert_eq!(
+            lint_prometheus_name("testnamespace_123").unwrap(),
+            "testnamespace_123"
+        );
+
+        // Test that invalid characters are stripped
+        assert_eq!(lint_prometheus_name("").unwrap(), ""); // Empty
+        assert_eq!(
+            lint_prometheus_name("test namespace").unwrap(),
+            "testnamespace"
+        ); // Space removed
+        assert_eq!(
+            lint_prometheus_name("test.namespace").unwrap(),
+            "testnamespace"
+        ); // Dot removed
+        assert_eq!(
+            lint_prometheus_name("test@namespace").unwrap(),
+            "testnamespace"
+        ); // @ removed
+        assert_eq!(
+            lint_prometheus_name("test#namespace").unwrap(),
+            "testnamespace"
+        ); // # removed
+        assert_eq!(
+            lint_prometheus_name("test$namespace").unwrap(),
+            "testnamespace"
+        ); // $ removed
+        assert_eq!(
+            lint_prometheus_name("test!@#$%^&*()namespace").unwrap(),
+            "testnamespace"
+        ); // Multiple special chars removed
+        assert_eq!(
+            lint_prometheus_name("testnamespace_123!").unwrap(),
+            "testnamespace_123"
+        ); // Trailing special char removed
+
+        // Test that hyphens are stripped (not allowed in Prometheus names)
+        assert_eq!(
+            lint_prometheus_name("test-namespace").unwrap(),
+            "testnamespace"
+        ); // Hyphen removed
+        assert_eq!(
+            lint_prometheus_name("test-namespace_123").unwrap(),
+            "testnamespace_123"
+        ); // Hyphen removed
+
+        // Test validation errors for invalid patterns
+        assert!(lint_prometheus_name("123test").is_err()); // Starts with digit
+        assert!(lint_prometheus_name("").is_ok()); // Empty is allowed
+    }
+}
+
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod test_prefixes {
     use super::create_test_drt;
     use super::*;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use prometheus::core::Collector;
 
     #[test]
     fn test_hierarchical_prefixes_and_parent_hierarchies() {
@@ -484,20 +713,17 @@ mod test_prefixes {
         // Create a distributed runtime for testing
         let drt = create_test_drt();
 
-        // Generate random namespace name
-        let mut hasher = DefaultHasher::new();
-        "test_namespace".hash(&mut hasher);
-        let random_num = hasher.finish();
-        let namespace_name = format!("mynamespace{}", random_num);
+        // Use a simple constant namespace name
+        let namespace_name = "testnamespace";
 
         // Create namespace
-        let namespace = drt.namespace(&namespace_name).unwrap();
+        let namespace = drt.namespace(namespace_name).unwrap();
 
         // Create component
-        let component = namespace.component("mycomponent").unwrap();
+        let component = namespace.component("testcomponent").unwrap();
 
         // Create endpoint
-        let endpoint = component.endpoint("myendpoint");
+        let endpoint = component.endpoint("testendpoint");
 
         // Test DistributedRuntime hierarchy
         println!("\n=== DistributedRuntime ===");
@@ -543,8 +769,8 @@ mod test_prefixes {
 
         assert_eq!(
             component.basename(),
-            "mycomponent",
-            "Component basename should be 'mycomponent'"
+            "testcomponent",
+            "Component basename should be 'testcomponent'"
         );
         assert_eq!(
             component.parent_hierarchy(),
@@ -553,8 +779,8 @@ mod test_prefixes {
         );
         assert_eq!(
             component.prefix(),
-            format!("{}_mycomponent", namespace),
-            "Component prefix should be 'namespace_mycomponent'"
+            format!("{}_testcomponent", namespace),
+            "Component prefix should be 'namespace_testcomponent'"
         );
 
         // Test Endpoint hierarchy
@@ -565,18 +791,18 @@ mod test_prefixes {
 
         assert_eq!(
             endpoint.basename(),
-            "myendpoint",
-            "Endpoint basename should be 'myendpoint'"
+            "testendpoint",
+            "Endpoint basename should be 'testendpoint'"
         );
         assert_eq!(
             endpoint.parent_hierarchy(),
-            vec!["", &namespace_name, "mycomponent"],
+            vec!["", &namespace_name, "testcomponent"],
             "Endpoint parent hierarchy should contain the generated namespace name"
         );
         assert_eq!(
             endpoint.prefix(),
-            format!("{}_mycomponent_myendpoint", namespace),
-            "Endpoint prefix should be 'namespace_mycomponent_myendpoint'"
+            format!("{}_testcomponent_testendpoint", namespace),
+            "Endpoint prefix should be 'namespace_testcomponent_testendpoint'"
         );
 
         // Test hierarchy relationships
@@ -626,6 +852,56 @@ mod test_prefixes {
         println!("Component prefix: '{}'", component.prefix());
         println!("Endpoint prefix: '{}'", endpoint.prefix());
         println!("All hierarchy assertions passed!");
+
+        // Test invalid namespace behavior
+        println!("\n=== Testing Invalid Namespace Behavior ===");
+
+        // Create a namespace with invalid name (contains hyphen)
+        let invalid_namespace = drt.namespace("@@123").unwrap();
+
+        // Debug: Let's see what the hierarchy looks like
+        println!(
+            "Invalid namespace basename: '{}'",
+            invalid_namespace.basename()
+        );
+        println!(
+            "Invalid namespace parent_hierarchy: {:?}",
+            invalid_namespace.parent_hierarchy()
+        );
+        println!("Invalid namespace prefix: '{}'", invalid_namespace.prefix());
+
+        // Try to create a metric - this should succeed because the namespace name will be sanitized
+        let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
+        println!("Result with invalid namespace '@@123':");
+        println!("{:?}", result);
+
+        // The result should be an error because '@@123' gets sanitized to '123' which is invalid
+        assert!(
+            result.is_err(),
+            "Creating metric with namespace '@@123' should fail because it gets sanitized to '123' which is invalid"
+        );
+
+        // Verify the error message indicates the sanitized name is still invalid
+        if let Err(e) = &result {
+            let error_msg = e.to_string();
+            assert!(
+                error_msg.contains("123"),
+                "Error message should mention the sanitized name '123', got: {}",
+                error_msg
+            );
+        }
+
+        // For comparison, show a valid namespace works
+        let valid_namespace = drt.namespace("test_namespace").unwrap();
+        let valid_result = valid_namespace.create_counter("test_counter", "A test counter", &[]);
+        println!("Result with valid namespace 'test_namespace':");
+        println!("{:?}", valid_result);
+        assert!(
+            valid_result.is_ok(),
+            "Creating metric with valid namespace should succeed"
+        );
+
+        println!("✓ Invalid namespace behavior verified!");
     }
 }
 
@@ -635,28 +911,50 @@ mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
     use super::*;
     use prometheus::Counter;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
     use std::sync::Arc;
+
+    #[test]
+    fn test_component_prometheus_output_contains_custom_label() {
+        // Arrange: DRT → namespace → component with a custom label
+        let drt = create_test_drt();
+        let namespace = drt.namespace("testnamespace").unwrap();
+        let component = namespace
+            .component("testcomponent")
+            .unwrap()
+            .add_labels(&[("service", "api")])
+            .unwrap();
+
+        // Act: create a simple gauge and render Prometheus text
+        let gauge = component
+            .create_gauge("with_label", "Gauge with custom label", &[])
+            .unwrap();
+        gauge.set(1.0);
+
+        let output = component.prometheus_metrics_fmt().unwrap();
+
+        // Assert: custom label is present (don’t rely on label ordering)
+        assert!(
+            output.contains("dynamo_component_with_label{") && output.contains(r#"service="api""#),
+            "Expected custom label service=\"api\" in Prometheus output:\n{}",
+            output
+        );
+    }
 
     #[test]
     fn test_factory_methods_via_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
         let drt = create_test_drt();
 
-        // Generate random namespace name
-        let mut hasher = DefaultHasher::new();
-        "test_factory_namespace".hash(&mut hasher);
-        let random_num = hasher.finish();
-        let namespace_name = format!("mynamespace{}", random_num);
+        // Use a simple constant namespace name
+        let namespace_name = "testnamespace";
 
-        let namespace = drt.namespace(&namespace_name).unwrap();
-        let component = namespace.component("mycomponent").unwrap();
-        let endpoint = component.endpoint("myendpoint");
+        let namespace = drt.namespace(namespace_name).unwrap();
+        let component = namespace.component("testcomponent").unwrap();
+        let endpoint = component.endpoint("testendpoint");
 
         // Test Counter creation
         let counter = endpoint
-            .create_counter("mycounter", "A test counter", &[])
+            .create_counter("testcounter", "A test counter", &[])
             .unwrap();
         counter.inc_by(123.456789);
         let epsilon = 0.01;
@@ -667,11 +965,10 @@ mod test_simple_metricsregistry_trait {
         println!("{}", endpoint_output);
 
         let expected_endpoint_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-"#,
-            namespace_name
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
+"#
         );
 
         assert_eq!(
@@ -685,7 +982,7 @@ mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.45
 
         // Test Gauge creation
         let gauge = component
-            .create_gauge("mygauge", "A test gauge", &[])
+            .create_gauge("testgauge", "A test gauge", &[])
             .unwrap();
         gauge.set(50000.0);
         assert_eq!(gauge.get(), 50000.0);
@@ -696,14 +993,13 @@ mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.45
         println!("{}", component_output);
 
         let expected_component_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-# HELP mygauge A test gauge
-# TYPE mygauge gauge
-mygauge{{component="mycomponent",namespace="{}"}} 50000
-"#,
-            namespace_name, namespace_name
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
+# HELP dynamo_component_testgauge A test gauge
+# TYPE dynamo_component_testgauge gauge
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
+"#
         );
 
         assert_eq!(
@@ -716,7 +1012,7 @@ mygauge{{component="mycomponent",namespace="{}"}} 50000
         );
 
         let intcounter = namespace
-            .create_intcounter("myintcounter", "A test int counter", &[])
+            .create_intcounter("testintcounter", "A test int counter", &[])
             .unwrap();
         intcounter.inc_by(12345);
         assert_eq!(intcounter.get(), 12345);
@@ -727,17 +1023,16 @@ mygauge{{component="mycomponent",namespace="{}"}} 50000
         println!("{}", namespace_output);
 
         let expected_namespace_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-# HELP mygauge A test gauge
-# TYPE mygauge gauge
-mygauge{{component="mycomponent",namespace="{}"}} 50000
-# HELP myintcounter A test int counter
-# TYPE myintcounter counter
-myintcounter{{namespace="{}"}} 12345
-"#,
-            namespace_name, namespace_name, namespace_name
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
+# HELP dynamo_component_testgauge A test gauge
+# TYPE dynamo_component_testgauge gauge
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
+# HELP dynamo_component_testintcounter A test int counter
+# TYPE dynamo_component_testintcounter counter
+dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
+"#
         );
 
         assert_eq!(
@@ -753,7 +1048,7 @@ myintcounter{{namespace="{}"}} 12345
         // lack labels since the DistributedRuntime is unnamed.
         let histogram = drt
             .create_histogram(
-                "myhistogram",
+                "testhistogram",
                 "A test histogram",
                 &[],
                 Some(vec![1.0, 2.5, 5.0, 10.0]),
@@ -766,7 +1061,7 @@ myintcounter{{namespace="{}"}} 12345
         // Test CounterVec creation
         let countervec = drt
             .create_countervec(
-                "mycountervec",
+                "testcountervec",
                 "A test counter vector",
                 &["method", "status"],
                 &[("service", "api")],
@@ -777,7 +1072,7 @@ myintcounter{{namespace="{}"}} 12345
 
         // Test IntGauge creation
         let intgauge = drt
-            .create_intgauge("myintgauge", "A test int gauge", &[])
+            .create_intgauge("testintgauge", "A test int gauge", &[])
             .unwrap();
         intgauge.set(42);
         assert_eq!(intgauge.get(), 42);
@@ -785,7 +1080,7 @@ myintcounter{{namespace="{}"}} 12345
         // Test IntGaugeVec creation
         let intgaugevec = drt
             .create_intgaugevec(
-                "myintgaugevec",
+                "testintgaugevec",
                 "A test int gauge vector",
                 &["instance", "status"],
                 &[("service", "api")],
@@ -804,46 +1099,45 @@ myintcounter{{namespace="{}"}} 12345
         println!("{}", drt_output);
 
         let expected_drt_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-# HELP mycountervec A test counter vector
-# TYPE mycountervec counter
-mycountervec{{method="GET",service="api",status="200"}} 10
-mycountervec{{method="POST",service="api",status="201"}} 5
-# HELP mygauge A test gauge
-# TYPE mygauge gauge
-mygauge{{component="mycomponent",namespace="{}"}} 50000
-# HELP myhistogram A test histogram
-# TYPE myhistogram histogram
-myhistogram_bucket{{le="1"}} 0
-myhistogram_bucket{{le="2.5"}} 2
-myhistogram_bucket{{le="5"}} 3
-myhistogram_bucket{{le="10"}} 3
-myhistogram_bucket{{le="+Inf"}} 3
-myhistogram_sum 7.5
-myhistogram_count 3
-# HELP myintcounter A test int counter
-# TYPE myintcounter counter
-myintcounter{{namespace="{}"}} 12345
-# HELP myintgauge A test int gauge
-# TYPE myintgauge gauge
-myintgauge 42
-# HELP myintgaugevec A test int gauge vector
-# TYPE myintgaugevec gauge
-myintgaugevec{{instance="server1",service="api",status="active"}} 10
-myintgaugevec{{instance="server2",service="api",status="inactive"}} 0
-"#,
-            namespace_name, namespace_name, namespace_name
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
+# HELP dynamo_component_testcountervec A test counter vector
+# TYPE dynamo_component_testcountervec counter
+dynamo_component_testcountervec{{method="GET",service="api",status="200"}} 10
+dynamo_component_testcountervec{{method="POST",service="api",status="201"}} 5
+# HELP dynamo_component_testgauge A test gauge
+# TYPE dynamo_component_testgauge gauge
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
+# HELP dynamo_component_testhistogram A test histogram
+# TYPE dynamo_component_testhistogram histogram
+dynamo_component_testhistogram_bucket{{le="1"}} 0
+dynamo_component_testhistogram_bucket{{le="2.5"}} 2
+dynamo_component_testhistogram_bucket{{le="5"}} 3
+dynamo_component_testhistogram_bucket{{le="10"}} 3
+dynamo_component_testhistogram_bucket{{le="+Inf"}} 3
+dynamo_component_testhistogram_sum 7.5
+dynamo_component_testhistogram_count 3
+# HELP dynamo_component_testintcounter A test int counter
+# TYPE dynamo_component_testintcounter counter
+dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
+# HELP dynamo_component_testintgauge A test int gauge
+# TYPE dynamo_component_testintgauge gauge
+dynamo_component_testintgauge 42
+# HELP dynamo_component_testintgaugevec A test int gauge vector
+# TYPE dynamo_component_testintgaugevec gauge
+dynamo_component_testintgaugevec{{instance="server1",service="api",status="active"}} 10
+dynamo_component_testintgaugevec{{instance="server2",service="api",status="inactive"}} 0
+"#
         );
 
         assert_eq!(
-            drt_output, expected_drt_output,
+            filtered_drt_output, expected_drt_output,
             "\n=== DRT COMPARISON FAILED ===\n\
              Expected:\n{}\n\
              Actual:\n{}\n\
              ==============================",
-            expected_drt_output, drt_output
+            expected_drt_output, filtered_drt_output
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");
