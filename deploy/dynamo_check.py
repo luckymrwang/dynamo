@@ -39,11 +39,13 @@ Dynamo Environment ($HOME/dynamo):
    └─ Binary:  $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so (modified: 2025-08-12 15:08:33 PDT)
 
 Missing framework components. You can choose one of the following options:
-1. For local development, set the PYTHONPATH environment variable:
-   dynamo_check.py --try-pythonpath --import-check-only
-   export PYTHONPATH="$HOME/dynamo/components/router/src:$HOME/dynamo/components/metrics/src:$HOME/dynamo/components/frontend/src:$HOME/dynamo/components/planner/src:$HOME/dynamo/components/backends/mocker/src:$HOME/dynamo/components/backends/trtllm/src:$HOME/dynamo/components/backends/vllm/src:$HOME/dynamo/components/backends/sglang/src:$HOME/dynamo/components/backends/llama_cpp/src"
-2. For a production-release (slower build time), build the packages with:
-   dynamo_build.sh --release
+1. For development mode (fast build, editable installation):
+   CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" cargo build --locked --features dynamo-llm/block-manager --workspace
+   cd lib/bindings/python && maturin develop --uv --features block-manager
+2. For production mode (slower build, optimized wheels):
+   cargo build --release --locked --features dynamo-llm/block-manager --workspace
+   cd lib/bindings/python && maturin build --release --features block-manager --out ../../target/wheels
+   cd ../../ && pip wheel --no-deps --wheel-dir target/wheels .
 """
 
 import argparse
@@ -56,7 +58,6 @@ import platform
 import shutil
 import subprocess
 import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
@@ -71,7 +72,6 @@ class DynamoChecker:
         )
         self.results: Dict[str, Any] = {}
         self._suppress_planner_warnings()
-        self.clear_cuda_memory: bool = False
         # Collect warnings that should be printed later (after specific headers)
         self._deferred_messages: List[str] = []
 
@@ -218,16 +218,6 @@ class DynamoChecker:
 
         return components
 
-    def _is_dynamo_build_available(self) -> bool:
-        """Check if dynamo_build.sh is available in the same directory as this script.
-
-        Returns:
-            True if dynamo_build.sh exists in the same directory as dynamo_check.py
-        """
-        script_dir = Path(__file__).parent
-        dynamo_build_path = script_dir / "dynamo_build.sh"
-        return dynamo_build_path.exists()
-
     def _replace_home_with_var(self, path: str) -> str:
         """Replace user's home directory in path with $HOME.
 
@@ -315,7 +305,7 @@ class DynamoChecker:
 
         return target_directory, cargo_home
 
-    def _print_system_info(self, clear_cuda: bool = False) -> bool:
+    def _print_system_info(self) -> bool:
         """Print concise system information as a top-level section.
 
         Tree structure:
@@ -376,7 +366,11 @@ class DynamoChecker:
 
         extras = []
         if mem_used_gib is not None and mem_total_gib is not None:
-            extras.append(f"Memory: {mem_used_gib:.1f}/{mem_total_gib:.1f} GiB")
+            mem_usage_percent = (mem_used_gib / mem_total_gib) * 100
+            warning_symbol = " ⚠️" if mem_usage_percent >= 90 else ""
+            extras.append(
+                f"Memory: {mem_used_gib:.1f}/{mem_total_gib:.1f} GiB{warning_symbol}"
+            )
         if cores:
             extras.append(f"Cores: {cores}")
         linux_line = base_linux if not extras else base_linux + "; " + "; ".join(extras)
@@ -414,99 +408,122 @@ class DynamoChecker:
                             # Take up to first parenthesis for clean model name
                             name_only = part.split("(")[0].strip()
                             names.append(name_only)
+                else:
+                    # nvidia-smi failed - capture the error
+                    error_msg = (
+                        proc_list.stderr.strip()
+                        if proc_list.stderr
+                        else "Unknown error"
+                    )
+                    gpu_line = f"❌ GPU: nvidia-smi failed - {error_msg}"
+                    gpu_driver_version = None
+                    gpu_cuda_version = None
+                    # Skip further nvidia-smi queries since it's failing
+                    names = []
 
-                # Query driver and CUDA
+                # Query driver and CUDA (only if nvidia-smi list succeeded)
                 driver = "?"
                 cuda = "?"
-                proc_q = subprocess.run(
-                    [
-                        nvsmi,
-                        "--query-gpu=driver_version,cuda_version",
-                        "--format=csv,noheader",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                )
-                if proc_q.returncode == 0 and proc_q.stdout.strip():
-                    first = proc_q.stdout.strip().splitlines()[0].split(",")
-                    if len(first) >= 1:
-                        driver = first[0].strip()
-                    if len(first) >= 2:
-                        cuda = first[1].strip()
-                else:
-                    # Fallback: parse banner
-                    proc_b = subprocess.run(
-                        [nvsmi], capture_output=True, text=True, timeout=10
-                    )
-                    if proc_b.returncode == 0 and proc_b.stdout:
-                        import re
-
-                        m = re.search(r"Driver Version:\s*([0-9.]+)", proc_b.stdout)
-                        if m:
-                            driver = m.group(1)
-                        m = re.search(r"CUDA Version:\s*([0-9.]+)", proc_b.stdout)
-                        if m:
-                            cuda = m.group(1)
-
-                gpu_driver_version = driver
-                gpu_cuda_version = cuda
-
-                # Query power and memory usage/limits (first GPU)
-                power_draw_w: Optional[str] = None
-                power_limit_w: Optional[str] = None
-                mem_used_mib: Optional[str] = None
-                mem_total_mib: Optional[str] = None
-                try:
-                    proc_pm = subprocess.run(
+                if names:  # Only proceed if we successfully got GPU names
+                    proc_q = subprocess.run(
                         [
                             nvsmi,
-                            "--query-gpu=power.draw,power.limit,memory.used,memory.total",
-                            "--format=csv,noheader,nounits",
+                            "--query-gpu=driver_version,cuda_version",
+                            "--format=csv,noheader",
                         ],
                         capture_output=True,
                         text=True,
                         timeout=10,
                     )
-                    if proc_pm.returncode == 0 and proc_pm.stdout.strip():
-                        first_pm = proc_pm.stdout.strip().splitlines()[0].split(",")
-                        if len(first_pm) >= 1:
-                            power_draw_w = first_pm[0].strip()
-                        if len(first_pm) >= 2:
-                            power_limit_w = first_pm[1].strip()
-                        if len(first_pm) >= 3:
-                            mem_used_mib = first_pm[2].strip()
-                        if len(first_pm) >= 4:
-                            mem_total_mib = first_pm[3].strip()
-                except Exception:
-                    pass
-
-                power_mem_suffix = ""
-                if any([power_draw_w, power_limit_w, mem_used_mib, mem_total_mib]):
-                    # Build terse summary; include only available parts
-                    parts = []
-                    if power_draw_w or power_limit_w:
-                        pd = power_draw_w if power_draw_w is not None else "?"
-                        pl = power_limit_w if power_limit_w is not None else "?"
-                        parts.append(f"Power: {pd}/{pl} W")
-                    if mem_used_mib or mem_total_mib:
-                        mu = mem_used_mib if mem_used_mib is not None else "?"
-                        mt = mem_total_mib if mem_total_mib is not None else "?"
-                        parts.append(f"Memory: {mu}/{mt} MiB")
-                    power_mem_suffix = "; " + "; ".join(parts)
-
-                if names:
-                    gpu_count = len(names)
-                    first_name = names[0]
-                    if gpu_count == 1:
-                        gpu_line = f"GPU: NVIDIA {first_name} (driver {driver}, CUDA {cuda}){power_mem_suffix}"
+                    if proc_q.returncode == 0 and proc_q.stdout.strip():
+                        first = proc_q.stdout.strip().splitlines()[0].split(",")
+                        if len(first) >= 1:
+                            driver = first[0].strip()
+                        if len(first) >= 2:
+                            cuda = first[1].strip()
                     else:
-                        gpu_line = f"GPU: NVIDIA x{gpu_count} ({first_name} first) (driver {driver}, CUDA {cuda}){power_mem_suffix}"
-                else:
-                    # No names but nvidia-smi present; still report driver/cuda
-                    gpu_line = (
-                        f"GPU: NVIDIA (driver {driver}, CUDA {cuda}){power_mem_suffix}"
-                    )
+                        # Fallback: parse banner
+                        proc_b = subprocess.run(
+                            [nvsmi], capture_output=True, text=True, timeout=10
+                        )
+                        if proc_b.returncode == 0 and proc_b.stdout:
+                            import re
+
+                            m = re.search(r"Driver Version:\s*([0-9.]+)", proc_b.stdout)
+                            if m:
+                                driver = m.group(1)
+                            m = re.search(r"CUDA Version:\s*([0-9.]+)", proc_b.stdout)
+                            if m:
+                                cuda = m.group(1)
+
+                    gpu_driver_version = driver
+                    gpu_cuda_version = cuda
+
+                # Query power and memory usage/limits (first GPU) - only if names available
+                if names:  # Only proceed if we successfully got GPU names
+                    power_draw_w: Optional[str] = None
+                    power_limit_w: Optional[str] = None
+                    mem_used_mib: Optional[str] = None
+                    mem_total_mib: Optional[str] = None
+                    try:
+                        proc_pm = subprocess.run(
+                            [
+                                nvsmi,
+                                "--query-gpu=power.draw,power.limit,memory.used,memory.total",
+                                "--format=csv,noheader,nounits",
+                            ],
+                            capture_output=True,
+                            text=True,
+                            timeout=10,
+                        )
+                        if proc_pm.returncode == 0 and proc_pm.stdout.strip():
+                            first_pm = proc_pm.stdout.strip().splitlines()[0].split(",")
+                            if len(first_pm) >= 1:
+                                power_draw_w = first_pm[0].strip()
+                            if len(first_pm) >= 2:
+                                power_limit_w = first_pm[1].strip()
+                            if len(first_pm) >= 3:
+                                mem_used_mib = first_pm[2].strip()
+                            if len(first_pm) >= 4:
+                                mem_total_mib = first_pm[3].strip()
+                    except Exception:
+                        pass
+
+                    power_mem_suffix = ""
+                    if any([power_draw_w, power_limit_w, mem_used_mib, mem_total_mib]):
+                        # Build terse summary; include only available parts
+                        parts = []
+                        if power_draw_w or power_limit_w:
+                            pd = power_draw_w if power_draw_w is not None else "?"
+                            pl = power_limit_w if power_limit_w is not None else "?"
+                            parts.append(f"Power: {pd}/{pl} W")
+                        if mem_used_mib or mem_total_mib:
+                            mu = mem_used_mib if mem_used_mib is not None else "?"
+                            mt = mem_total_mib if mem_total_mib is not None else "?"
+                            # Add warning symbol if GPU memory usage is 90% or higher
+                            if mu != "?" and mt != "?":
+                                try:
+                                    mem_usage_percent = (float(mu) / float(mt)) * 100
+                                    warning_symbol = (
+                                        " ⚠️" if mem_usage_percent >= 90 else ""
+                                    )
+                                except (ValueError, ZeroDivisionError):
+                                    warning_symbol = ""
+                            else:
+                                warning_symbol = ""
+                            parts.append(f"Memory: {mu}/{mt} MiB{warning_symbol}")
+                        power_mem_suffix = "; " + "; ".join(parts)
+
+                    if names:
+                        gpu_count = len(names)
+                        first_name = names[0]
+                        if gpu_count == 1:
+                            gpu_line = f"GPU: NVIDIA {first_name} (driver {driver}, CUDA {cuda}){power_mem_suffix}"
+                        else:
+                            gpu_line = f"GPU: NVIDIA x{gpu_count} ({first_name} first) (driver {driver}, CUDA {cuda}){power_mem_suffix}"
+                    else:
+                        # No names but nvidia-smi present; still report driver/cuda
+                        gpu_line = f"GPU: NVIDIA (driver {driver}, CUDA {cuda}){power_mem_suffix}"
 
             elif shutil.which("rocm-smi"):
                 proc = subprocess.run(
@@ -562,29 +579,8 @@ class DynamoChecker:
             # torch not installed
             pass
 
-        # Optionally clear CUDA memory via torch
+        # Extra lines for additional system info
         extra_lines: List[str] = []
-        if clear_cuda:
-            status = "CUDA memory: torch not available"
-            try:
-                import importlib
-
-                torch = importlib.import_module("torch")  # type: ignore
-                if hasattr(torch, "cuda") and torch.cuda.is_available():
-                    try:
-                        torch.cuda.empty_cache()
-                        if hasattr(torch.cuda, "reset_peak_memory_stats"):
-                            torch.cuda.reset_peak_memory_stats()
-                        status = "CUDA memory: cache cleared; peak stats reset"
-                    except Exception as e:
-                        status = (
-                            f"CUDA memory: failed to clear ({e.__class__.__name__})"
-                        )
-                else:
-                    status = "CUDA memory: CUDA not available"
-            except Exception:
-                pass
-            extra_lines.append(status)
 
         # Prepare CUDA line (single, compact) and print System info in required order
         # Use driver/CUDA version from nvidia-smi when available
@@ -611,29 +607,25 @@ class DynamoChecker:
         cargo_target, cargo_home = self._get_cargo_info()
         has_cargo = bool(cargo_path or cargo_home or cargo_target)
 
-        print("System info:")
-        # Linux
-        print(f"├─ {linux_line}")
-        # GPU
-        print(f"├─ {gpu_line}")
+        print(
+            f"""System info:
+├─ {linux_line}
+├─ {gpu_line}"""
+        )
         # CUDA right after GPU, if available (power/memory already appended to GPU line)
         if cuda_line:
             print(f"├─ {cuda_line}")
-        # Python line; if more top-level entries come after Python subtree, use mid symbol
-        more_after_python = bool(extra_lines or has_cargo)
-        print(f"{'├─' if more_after_python else '└─'} {python_line}")
-        # Torch version as a child under Python
-        if torch_version:
-            print("   └─ Torch: " + str(torch_version))
-        else:
-            # Show as a child under Python
-            print("   └─ ❌ Torch: not installed")
         # Extra lines (e.g., CUDA memory clear status)
         for i, line in enumerate(extra_lines):
             # If cargo follows after extra lines, use mid symbol; else close on last
             is_last_extra = i == len(extra_lines) - 1
             symbol = "├─" if (has_cargo or not is_last_extra) else "└─"
             print(f"{symbol} {line}")
+
+        # If no extra lines, and no cargo, close the system info section
+        if not extra_lines and not has_cargo:
+            # System info is complete, Dynamo Environment follows
+            pass
 
         # Cargo Info block
         if has_cargo:
@@ -729,6 +721,45 @@ class DynamoChecker:
             print(
                 "├─ ❌ Cargo: not found (install Rust toolchain to see cargo target directory)"
             )
+
+        # Maturin check (Python-Rust build tool)
+        maturin_path = shutil.which("maturin")
+        maturin_version = None
+        try:
+            proc = subprocess.run(
+                ["maturin", "--version"], capture_output=True, text=True, timeout=5
+            )
+            if proc.returncode == 0 and proc.stdout:
+                maturin_version = proc.stdout.strip()
+        except Exception:
+            pass
+
+        has_maturin = bool(maturin_path or maturin_version)
+
+        if has_maturin:
+            maturin_heading = "Maturin ("
+            if maturin_path:
+                maturin_heading += f"{maturin_path}"
+            else:
+                maturin_heading += "maturin not found"
+            if maturin_version:
+                maturin_heading += f", {maturin_version}"
+            maturin_heading += ")"
+            print(f"├─ {maturin_heading}")
+        else:
+            print("├─ ❌ Maturin: not found")
+            print("   Install with: uv pip install maturin[patchelf]")
+
+        # Python line (moved here to appear after Maturin, before Dynamo)
+        # Determine if more top-level entries come after Python
+        more_after_python = bool(has_cargo)
+        print(f"{'├─' if more_after_python else '└─'} {python_line}")
+        # Torch version as a child under Python
+        if torch_version:
+            print("   └─ Torch: " + str(torch_version))
+        else:
+            # Show as a child under Python
+            print("   └─ ❌ Torch: not installed")
         # Determine if any errors were printed in system info (treat only Python and Cargo as fatal here)
         system_errors_found = False
         if isinstance(python_line, str) and python_line.startswith("❌"):
@@ -878,9 +909,9 @@ class DynamoChecker:
                 pythonpath_value = f"{pythonpath_value}:{current_path}"
 
             print(
-                f'Below are the results if you export PYTHONPATH="{pythonpath_value}":'
+                f"""Below are the results if you export PYTHONPATH="{pythonpath_value}":
+   ({len(paths)} workspace component paths found)"""
             )
-            print(f"   ({len(paths)} workspace component paths found)")
             for path in paths:
                 print(f"   • {path}")
             print()
@@ -1009,15 +1040,15 @@ class DynamoChecker:
                     if self.workspace_dir and module_path.startswith(
                         self.workspace_dir
                     ):
-                        # From workspace source
-                        rel_path = os.path.relpath(module_path, self.workspace_dir)
+                        # From workspace source - show absolute path with $HOME replacement
+                        display_path = self._replace_home_with_var(module_path)
                         if show_timestamp:
                             print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {rel_path}{timestamp_str}"
+                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}{timestamp_str}"
                             )
                         else:
                             print(
-                                f"{tree_symbol} ✅ {component:<{max_width}} {rel_path}"
+                                f"{tree_symbol} ✅ {component:<{max_width}} {display_path}"
                             )
                     elif site_packages and module_path.startswith(site_packages):
                         # From installed package - show path with $HOME replacement
@@ -1177,7 +1208,7 @@ class DynamoChecker:
         results = {}
 
         # Print system info at top-level, before Dynamo Environment
-        system_errors = self._print_system_info(clear_cuda=self.clear_cuda_memory)
+        system_errors = self._print_system_info()
 
         # Then print main environment header as a subtree under System info
         if (
@@ -1261,24 +1292,7 @@ class DynamoChecker:
             if pythonpath:
                 # Apply $HOME replacement to PYTHONPATH for consistency
                 display_pythonpath = self._replace_home_with_var(pythonpath)
-                print(
-                    "\nMissing framework components. You can choose one of the following options:"
-                )
-                print(
-                    "1. For local development, set the PYTHONPATH environment variable:"
-                )
-                print(
-                    f'   dynamo_check.py --try-pythonpath --import-check-only\n   export PYTHONPATH="{display_pythonpath}"'
-                )
-                not_found_suffix = (
-                    ""
-                    if self._is_dynamo_build_available()
-                    else "  # (dynamo_build.sh not found)"
-                )
-                print(
-                    "2. For a production-release (slower build time), build the packages with:"
-                )
-                print(f"   dynamo_build.sh --release{not_found_suffix}")
+                self._show_build_options(display_pythonpath)
 
         # Exit with non-zero status if any errors detected
         # Treat Python or Cargo failures from system info, and invalid path, as failures.
@@ -1289,33 +1303,79 @@ class DynamoChecker:
         )
         # Store whether errors occurred for overall run
         self.results["had_errors"] = any_failures
+
         return results
+
+    def _show_build_options(self, display_pythonpath: str):
+        """Show build options for missing framework components.
+
+        Args:
+            display_pythonpath: PYTHONPATH string with $HOME replacement
+        """
+        # Get cargo target directory dynamically
+        cargo_target, _ = self._get_cargo_info()
+        cargo_target_dir = cargo_target if cargo_target else "target"
+
+        print(
+            f"""
+Missing framework components. You can choose one of the following options:
+
+1. For development mode (fast build, editable installation):
+   # Step 1: Uninstall existing packages to ensure clean installation
+   uv pip uninstall ai-dynamo ai-dynamo-runtime
+
+   # Step 2: Compiles Rust code to native binaries with debug optimization (using subshell for env vars)
+   # Output: {cargo_target_dir}/debug/ directory with .so files
+   (cd {self.workspace_dir} && CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" cargo build --locked --features dynamo-llm/block-manager --workspace)
+   # Step 3: Creates editable Python installation (no wheel file)
+   # Output: .pth files in site-packages, links to source code
+   (cd {self.workspace_dir}/lib/bindings/python && maturin develop --uv --features block-manager)
+
+2. For production mode (slower build, optimized wheels):
+
+   # Step 1: Clear development environment variables for production builds
+   unset CARGO_INCREMENTAL
+   unset RUSTFLAGS
+
+   # Step 2: Uninstall existing packages to ensure clean installation
+   uv pip uninstall ai-dynamo ai-dynamo-runtime
+
+   # Step 3: Compile Rust code with full optimization for production
+   # Output: {cargo_target_dir}/release/ directory with optimized .so files (~45MB)
+   (cd {self.workspace_dir} && cargo build --release --locked --features dynamo-llm/block-manager --workspace)
+
+   # Step 4: Clean up any existing wheel files for clean output
+   # This ensures no conflicts with previous builds
+   rm -f {cargo_target_dir}/wheels/*.whl
+
+   # Step 5: Build ai-dynamo-runtime package (Rust extensions + Python bindings)
+   # Output: ai_dynamo_runtime-*.whl wheel file (~16MB)
+   # Contains: dynamo._core.so (~45MB Rust), Python modules (~16MB)
+   (cd {self.workspace_dir}/lib/bindings/python && maturin build --release --features block-manager --out {cargo_target_dir}/wheels)
+
+   # Step 6: Install the runtime wheel package
+   # This makes dynamo._core, dynamo.runtime, dynamo.llm available
+   (cd {cargo_target_dir}/wheels && uv pip install --upgrade --force-reinstall --no-deps ai_dynamo_runtime-*.whl)
+
+   # Step 7: Build ai-dynamo framework package (Complete framework with all components)
+   # Output: ai_dynamo-*.whl wheel file (~90KB)
+   # Contains: frontend, planner, backends (vllm, sglang, trtllm, llama_cpp, mocker)
+   (cd {self.workspace_dir} && pip wheel --no-deps --wheel-dir {cargo_target_dir}/wheels .)
+
+   # Step 8: Install the framework wheel package
+   # This makes dynamo.frontend, dynamo.planner, dynamo.vllm, etc. available
+   (cd {cargo_target_dir}/wheels && uv pip install --upgrade --find-links . ai_dynamo-*.whl)
+
+3. For immediate testing (no rebuild), set PYTHONPATH:
+   dynamo_check.py --try-pythonpath --import-check-only
+   export PYTHONPATH="{display_pythonpath}" """
+        )
 
     # ====================================================================
     # USAGE EXAMPLES AND GUIDANCE
     # ====================================================================
 
     def show_usage_examples(self):
-        """Show practical usage examples.
-
-        Prints formatted examples of common dynamo operations including:
-        - Starting frontend server
-        - Starting vLLM backend
-        - Making inference requests
-        - Setting up development environment
-        - Building packages
-
-        Console output example:
-            Usage Examples
-            ========================================
-
-            1. Start Frontend Server:
-               python -m dynamo.frontend --http-port 8000
-
-            2. Start vLLM Backend:
-               python -m dynamo.vllm --model Qwen/Qwen2.5-0.5B
-               ...
-        """
         print(
             """
 Usage Examples
@@ -1346,14 +1406,24 @@ Usage Examples
                 '   • Then set in your shell: export PYTHONPATH="$HOME/dynamo/components/*/src"'
             )
 
-        not_found_suffix = (
-            "" if self._is_dynamo_build_available() else " (dynamo_build.sh not found)"
-        )
         print(
-            f"""
+            """
 5. Build Packages:
-   dynamo_build.sh --dev              # Development mode{not_found_suffix}
-   dynamo_build.sh --release          # Production wheels{not_found_suffix}"""
+   # See detailed build commands in the troubleshooting section above
+   # (Development mode: Fast build, editable installation)
+   # (Production mode: Slower build, optimized wheels)
+
+6. Troubleshooting:
+   # CUDA Memory Issues:
+   # If you encounter CUDA memory problems, you can clear the cache manually:
+   # python -c "import torch; torch.cuda.empty_cache() if torch.cuda.is_available() else None"
+   # python -c "import torch; torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None"
+
+   # GPU Detection Issues:
+   # If GPU info is not showing correctly, check:
+   # - nvidia-smi is installed and working
+   # - GPU drivers are properly installed
+   # - CUDA toolkit is available"""
         )
 
     def _get_pythonpath(self) -> str:
@@ -1388,18 +1458,6 @@ Usage Examples
         return ":".join(paths)
 
     # ====================================================================
-    # TROUBLESHOOTING AND SUMMARY
-    # ====================================================================
-
-    def show_troubleshooting(self):
-        """Troubleshooting section removed for terse output."""
-        return
-
-    def show_summary(self):
-        """Summary output intentionally omitted for terse mode."""
-        return
-
-    # ====================================================================
     # MAIN ORCHESTRATION
     # ====================================================================
 
@@ -1426,8 +1484,6 @@ Usage Examples
         had_errors_flag = bool(self.results.get("had_errors"))
         if not has_failures and not had_errors_flag:
             self.show_usage_examples()
-        self.show_troubleshooting()
-        self.show_summary()
         # If any errors found, exit with status 1
         had_errors = bool(self.results.get("had_errors"))
         if had_errors:
@@ -1442,6 +1498,11 @@ def main():
     )
     parser.add_argument("--examples", action="store_true", help="Only show examples")
     parser.add_argument(
+        "--build-options",
+        action="store_true",
+        help="Show build options for missing framework components",
+    )
+    parser.add_argument(
         "--try-pythonpath",
         action="store_true",
         help="Test imports with workspace component source directories in sys.path",
@@ -1451,11 +1512,6 @@ def main():
         type=str,
         default=None,
         help="Explicit path to dynamo workspace; if set, bypass workspace auto-discovery",
-    )
-    parser.add_argument(
-        "--clear-cuda-memory",
-        action="store_true",
-        help="Attempt to clear CUDA cache and reset peak memory stats via torch",
     )
 
     args = parser.parse_args()
@@ -1469,7 +1525,6 @@ def main():
             checker._deferred_messages.append(
                 f"❌ Error: invalid workspace path: {abs_path}"
             )
-    checker.clear_cuda_memory = bool(args.clear_cuda_memory)
 
     # Set up sys.path if requested
     if args.try_pythonpath:
@@ -1481,15 +1536,33 @@ def main():
         had_errors = bool(checker.results.get("had_errors"))
         if had_errors:
             sys.exit(1)
-    elif args.examples:
-        # Always show system info first, then environment header
-        checker._print_system_info(clear_cuda=checker.clear_cuda_memory)
+        # If examples are also requested and imports succeeded, show them
+        if args.examples:
+            checker.show_usage_examples()
+        # If build options are also requested, show them
+        if args.build_options:
+            if checker.workspace_dir:
+                pythonpath = checker._get_pythonpath()
+                if pythonpath:
+                    display_pythonpath = checker._replace_home_with_var(pythonpath)
+                    checker._show_build_options(display_pythonpath)
+                else:
+                    print("❌ Error: Could not determine PYTHONPATH for build options")
+            else:
+                print("❌ Error: No dynamo workspace found for build options")
+    elif args.build_options:
+        # Show build options directly
         if checker.workspace_dir:
-            workspace_path = os.path.abspath(checker.workspace_dir)
-            display_workspace = checker._replace_home_with_var(workspace_path)
-            print(f"Dynamo ({display_workspace}):")
+            pythonpath = checker._get_pythonpath()
+            if pythonpath:
+                display_pythonpath = checker._replace_home_with_var(pythonpath)
+                checker._show_build_options(display_pythonpath)
+            else:
+                print("❌ Error: Could not determine PYTHONPATH for build options")
         else:
-            print("Dynamo (workspace not found):")
+            print("❌ Error: No dynamo workspace found for build options")
+    elif args.examples:
+        # Only show examples, no system info or environment header
         checker.show_usage_examples()
     else:
         checker.run_all()
