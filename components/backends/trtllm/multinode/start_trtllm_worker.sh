@@ -35,6 +35,12 @@ if [[ -n ${MODALITY} ]]; then
   EXTRA_ARGS+="--modality ${MODALITY} "
 fi
 
+echo "DEBUG: Setting EXTRA_ARGS: ${EXTRA_ARGS}"
+
+SRC="/mnt/handler_base.py"
+DST="/usr/local/lib/python3.12/dist-packages/dynamo/trtllm/request_handlers"
+echo "DEBUG: Copying from $SRC to $DST for debugging"
+
 trtllm-llmapi-launch \
   python3 -m dynamo.trtllm \
     --model-path "${MODEL_PATH}" \

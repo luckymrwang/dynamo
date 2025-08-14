@@ -70,7 +70,7 @@ for ((i=1; i<=${NUM_PREFILL_WORKERS}; i++)); do
     --oversubscribe \
     --container-image "${IMAGE}" \
     --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
+    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG,MODALITY \
     --verbose \
     --label \
     -A "${ACCOUNT}" \
@@ -90,7 +90,7 @@ for ((i=1; i<=${NUM_DECODE_WORKERS}; i++)); do
     --oversubscribe \
     --container-image "${IMAGE}" \
     --container-mounts "${MOUNTS}" \
-    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG \
+    --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,DISAGGREGATION_MODE,DISAGGREGATION_STRATEGY,ENGINE_CONFIG,MODALITY \
     --verbose \
     --label \
     -A "${ACCOUNT}" \
