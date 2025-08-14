@@ -81,7 +81,6 @@ impl KvbmLeader {
             .drt(drt.inner().clone())
             .host_blocks_config(get_blocks_config(CPU_CACHE, CPU_CACHE_OVERRIDE))
             .disk_blocks_config(get_blocks_config(DISK_CACHE, DISK_CACHE_OVERRIDE))
-            .bytes_per_block_overriden(bytes_per_block)
             .build()
             .map_err(to_pyerr)?;
 

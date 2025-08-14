@@ -20,8 +20,6 @@ try:
     KvConnectorLeader = getattr(_vllm_integration, "PyTrtllmKvConnectorLeader")
     SchedulerOutput = getattr(_vllm_integration, "SchedulerOutput")
 
-    from dynamo.llm import BlockManager
-
 except ImportError:
     print(
         "Failed to import Dynamo KVBM. TensorRT-LLM integration will not be available."
@@ -31,7 +29,6 @@ except ImportError:
     BlockState = None
     BlockStates = None
     SlotUpdate = None
-    BlockManager = None
     KvConnectorWorker = None
     KvConnectorLeader = None
     SchedulerOutput = None
@@ -42,7 +39,6 @@ __all__ = [
     "BlockState",
     "BlockStates",
     "SlotUpdate",
-    "BlockManager",
     "KvConnectorWorker",
     "KvConnectorLeader",
     "SchedulerOutput",

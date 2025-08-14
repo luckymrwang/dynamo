@@ -83,7 +83,7 @@ pub fn load_and_validate_tensors(
     Ok((device_tensors, shape.unwrap()))
 }
 
-#[derive(Builder)]
+#[derive(Builder, Clone)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
     drt: DistributedRuntime,
@@ -219,27 +219,48 @@ impl KvbmWorker {
         // let scheduler = KvbmWorkerScheduler::new(config.scheduler.clone());
         let cancel_token = config.drt.primary_token().clone();
 
+        let leader_data = tokio::task::block_in_place(|| {
+            // This is now synchronous blocking code
+            // We need a separate current-thread runtime to block_on async calls here
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                KvbmWorker::leader_barrier_sync(config.clone(), cancel_token.clone(), bytes_per_block).await
+            })
+        })?;
+
         // establish a oneshot channel to get back the raw BlockTransferHandler
         let (handler_tx, handler_rx) = oneshot::channel();
 
         let scheduler_client = config.scheduler_client.clone();
 
+        let worker_config = config.clone();
         let task = CriticalTaskExecutionHandle::new(
             move |cancel_token| {
                 KvbmWorker::worker_task(
                     device_layout,
                     layout_builder_clone,
+                    leader_data,
                     layout_type,
-                    config,
+                    worker_config,
                     cancel_token,
                     handler_tx,
                     scheduler_client,
-                    bytes_per_block,
                 )
             },
             cancel_token.clone(),
             "kvbm-worker-task",
         )?;
+
+        let worker_config = config.clone();
+        let cancel_for_barrier = cancel_token.clone();
+        tokio::task::block_in_place(|| {
+            // This is now synchronous blocking code
+            // We need a separate current-thread runtime to block_on async calls here
+            let rt = tokio::runtime::Handle::current();
+            rt.block_on(async {
+                KvbmWorker::leader_readiness_sync(worker_config, cancel_for_barrier).await
+            })
+        })?;
 
         Ok(Self {
             task: Some(task),
@@ -273,16 +294,11 @@ impl KvbmWorker {
         Ok(blocks)
     }
 
-    async fn worker_task(
-        device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
-        mut layout_builder: LayoutConfigBuilder,
-        layout_type: LayoutType,
+    async fn leader_barrier_sync(
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
-        handler_tx: oneshot::Sender<BlockTransferHandler>,
-        scheduler_client: Option<TransferSchedulerClient>,
-        bytes_per_block: usize,
-    ) -> anyhow::Result<()> {
+        bytes_per_block: usize) -> anyhow::Result<KvbmLeaderData> {
+
         let drt = config.drt.clone();
 
         let worker_id = drt
@@ -312,7 +328,7 @@ impl KvbmWorker {
         // leader_data is not important in the worker to leader phase
         let _leader_data = tokio::select! {
             _ = cancel_token.cancelled() => {
-                return Ok(())
+                return Err(anyhow::anyhow!("Cancelled"))
             }
             _leader_data = worker_to_leader_barrier.sync(&drt, &worker_data) => {
                 _leader_data
@@ -340,7 +356,7 @@ impl KvbmWorker {
 
         let leader_data = tokio::select! {
             _ = cancel_token.cancelled() => {
-                return Ok(())
+                return Err(anyhow::anyhow!("Cancelled"))
             }
             leader_data = leader_to_worker_barrier.sync(&drt, &worker_data) => {
                 leader_data
@@ -353,6 +369,67 @@ impl KvbmWorker {
             worker_id,
             leader_data
         );
+
+        Ok(leader_data)
+    }
+
+    async fn leader_readiness_sync(
+        config: KvbmWorkerConfig,
+        cancel_token: CancellationToken) -> anyhow::Result<()> {
+
+        let drt = config.drt.clone();
+
+        let worker_id = drt
+            .primary_lease()
+            .ok_or(anyhow::anyhow!(
+                "unable to get primary lease; check that drt is not static"
+            ))?
+            .id() as usize;
+
+        let barrier_id_leader_readiness = format!("{}{}", config.barrier_id_prefix, "-leader-ready");
+            tracing::info!(
+                "Worker {} waiting on barrier {}",
+                worker_id,
+                barrier_id_leader_readiness
+            );
+
+        let leader_readiness_barrier = WorkerBarrier::<(), ()>::new(
+            barrier_id_leader_readiness,
+            worker_id.to_string(),
+        );
+
+        // leader_data is not important in the leader readiness case
+        tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Err(anyhow::anyhow!("Cancelled"))
+            }
+            _leader_data = leader_readiness_barrier.sync(&drt, &()) => {
+                _leader_data
+            }
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to sync leader readiness barrier: {:?}", e))?;
+
+        Ok(())
+    }
+
+    async fn worker_task(
+        device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+        mut layout_builder: LayoutConfigBuilder,
+        leader_data: KvbmLeaderData,
+        layout_type: LayoutType,
+        config: KvbmWorkerConfig,
+        cancel_token: CancellationToken,
+        handler_tx: oneshot::Sender<BlockTransferHandler>,
+        scheduler_client: Option<TransferSchedulerClient>,
+    ) -> anyhow::Result<()> {
+        let drt = config.drt.clone();
+
+        let worker_id = drt
+            .primary_lease()
+            .ok_or(anyhow::anyhow!(
+                "unable to get primary lease; check that drt is not static"
+            ))?
+            .id() as usize;
 
         let agent = build_agent(worker_id, leader_data.num_disk_blocks > 0)?;
 

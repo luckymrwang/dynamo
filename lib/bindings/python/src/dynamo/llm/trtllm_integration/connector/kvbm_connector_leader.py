@@ -11,7 +11,7 @@ from tensorrt_llm._torch.pyexecutor.kv_cache_connector import (
 from tensorrt_llm.bindings.executor import ExecutorConfig
 from tensorrt_llm.bindings.internal.batch_manager import LlmRequest
 
-from dynamo.llm import BlockManager, KvbmLeader
+from dynamo.llm import KvbmLeader
 from dynamo.llm.trtllm_integration.rust import KvbmRequest
 from dynamo.llm.trtllm_integration.rust import (
     KvConnectorLeader as RustKvConnectorLeader,
@@ -25,24 +25,17 @@ class DynamoKVBMConnectorLeader(KvCacheConnectorScheduler):
         super().__init__(executor_config)
         self.drt = DistributedRuntime.detached()
 
-        world_size = self._config.world_size
+        world_size = self._config.mapping.world_size
         self.block_size = self._config.tokens_per_block
 
         # Set bytes_per_block to 0, because we will retrieve the actual value from the worker side.
         leader = KvbmLeader(0, world_size, drt=self.drt)
 
-        block_manager = BlockManager(
-            0,
-            leader,
-            self.block_size,
-            disable_device_pool=True,
-        )
-
         print(
             f"KvConnectorLeader initialized with rank: {executor_config.mapping.rank}"
         )
         self._connector = RustKvConnectorLeader(
-            executor_config.mapping.rank, self.drt, block_manager, leader
+            executor_config.mapping.rank, self.drt, self.block_size, leader
         )
 
     def build_connector_meta(self, scheduler_output: SchedulerOutput) -> bytes:
