@@ -628,6 +628,48 @@ pub trait OnErrorPolicy: Send + Sync + std::fmt::Debug {
     /// # Returns
     /// ErrorResponse indicating how the TaskTracker should handle this failure
     fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse;
+
+    /// Should continuations be allowed for this error?
+    ///
+    /// This method is called before checking if a task provided a continuation to determine
+    /// whether the policy allows continuation-based retries at all. If this returns `false`,
+    /// any `FailedWithContinuation` will be ignored and the error will be handled through
+    /// the normal policy response.
+    ///
+    /// # Arguments
+    /// * `error` - The error that occurred
+    /// * `context` - Per-task context with attempt count and state
+    ///
+    /// # Returns
+    /// * `true` - Allow continuations, check for `FailedWithContinuation` (default)
+    /// * `false` - Reject continuations, handle through normal policy response
+    fn allow_continuation(&self, _error: &anyhow::Error, _context: &OnErrorContext) -> bool {
+        true // Default: allow continuations
+    }
+
+    /// Should this continuation be rescheduled through the scheduler?
+    ///
+    /// This method is called when a continuation is about to be executed to determine
+    /// whether it should go through the scheduler's acquisition process again or execute
+    /// immediately with the current execution permission.
+    ///
+    /// **What this means:**
+    /// - **Don't reschedule (`false`)**: Execute continuation immediately with current permission
+    /// - **Reschedule (`true`)**: Release current permission, go through scheduler again
+    ///
+    /// Rescheduling means the continuation will be subject to the scheduler's policies
+    /// again (rate limiting, concurrency limits, backoff delays, etc.).
+    ///
+    /// # Arguments
+    /// * `error` - The error that triggered this retry decision
+    /// * `context` - Per-task context with attempt count and state
+    ///
+    /// # Returns
+    /// * `false` - Execute continuation immediately (default, efficient)
+    /// * `true` - Reschedule through scheduler (for delays, rate limiting, backoff)
+    fn should_reschedule(&self, _error: &anyhow::Error, _context: &OnErrorContext) -> bool {
+        false // Default: immediate execution
+    }
 }
 
 /// Common error handling policies for task failure management
@@ -785,6 +827,26 @@ pub trait OnErrorAction: Send + Sync + std::fmt::Debug {
         attempt_count: u32,
         context: &TaskExecutionContext,
     ) -> ActionResult;
+}
+
+/// Scheduler execution guard state for conditional re-acquisition during task retry loops
+///
+/// This controls whether a continuation should reuse the current scheduler execution permission
+/// or go through the scheduler's acquisition process again.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GuardState {
+    /// Keep the current scheduler execution permission for immediate continuation
+    ///
+    /// The continuation will execute immediately without going through the scheduler again.
+    /// This is efficient for simple retries that don't need delays or rate limiting.
+    Keep,
+
+    /// Release current permission and re-acquire through scheduler before continuation
+    ///
+    /// The continuation will be subject to the scheduler's policies again (concurrency limits,
+    /// rate limiting, backoff delays, etc.). Use this for implementing retry delays or
+    /// when the scheduler needs to apply its policies to the retry attempt.
+    Reschedule,
 }
 
 /// Result of a custom error action execution
@@ -2516,19 +2578,29 @@ impl TaskTrackerInner {
         let mut current_executable = CurrentExecutable::TaskExecutor(initial_executor);
         let mut active_guard = ActiveCountGuard::new(inner.metrics.clone());
         let mut error_context: Option<OnErrorContext> = None;
+        let mut scheduler_guard_state = self::GuardState::Keep;
+        let mut guard_result = async {
+            inner
+                .scheduler
+                .acquire_execution_slot(inner.cancel_token.child_token())
+                .await
+        }
+        .instrument(tracing::debug_span!("scheduler_resource_reacquisition"))
+        .await;
 
         loop {
-            // Acquire execution slot through scheduler with cancellation token
-            let guard_result = async {
-                inner
-                    .scheduler
-                    .acquire_execution_slot(inner.cancel_token.child_token())
-                    .await
+            if scheduler_guard_state == self::GuardState::Reschedule {
+                guard_result = async {
+                    inner
+                        .scheduler
+                        .acquire_execution_slot(inner.cancel_token.child_token())
+                        .await
+                }
+                .instrument(tracing::debug_span!("scheduler_resource_reacquisition"))
+                .await;
             }
-            .instrument(tracing::debug_span!("scheduler_resource_acquisition"))
-            .await;
 
-            match guard_result {
+            match &guard_result {
                 SchedulingResult::Execute(_guard) => {
                     // Activate the RAII guard only once when we successfully acquire resources
                     active_guard.activate();
@@ -2589,13 +2661,16 @@ impl TaskTrackerInner {
                             debug!("Task failed - handling error through policy - {error:?}");
 
                             // Handle the error through the policy system
-                            let action_result = Self::handle_task_error(
+                            let (action_result, guard_state) = Self::handle_task_error(
                                 &error,
                                 &mut error_context,
                                 task_id,
                                 &inner,
                             )
                             .await;
+
+                            // Update the scheduler guard state for evaluation after the match
+                            scheduler_guard_state = guard_state;
 
                             match action_result {
                                 ActionResult::Fail => {
@@ -2614,9 +2689,10 @@ impl TaskTrackerInner {
                                         "Policy provided next executable - continuing loop - {error:?}"
                                     );
 
-                                    // Update current executable and continue the loop
+                                    // Update current executable
                                     current_executable =
                                         CurrentExecutable::Continuation(continuation);
+
                                     continue; // Continue the main loop with the new executable
                                 }
                             }
@@ -2646,7 +2722,7 @@ impl TaskTrackerInner {
         error_context: &mut Option<OnErrorContext>,
         task_id: TaskId,
         inner: &Arc<TaskTrackerInner>,
-    ) -> ActionResult {
+    ) -> (ActionResult, self::GuardState) {
         // Create or update the error context (lazy initialization)
         let context = error_context.get_or_insert_with(|| OnErrorContext {
             attempt_count: 0, // Will be incremented below
@@ -2662,26 +2738,44 @@ impl TaskTrackerInner {
         context.attempt_count += 1;
         let current_attempt = context.attempt_count;
 
-        // First, check if this is a FailedWithContinuation (task-driven continuation)
-        if let Some(continuation_err) = error.downcast_ref::<FailedWithContinuation>() {
+        // First, check if the policy allows continuations for this error
+        if inner.error_policy.allow_continuation(error, context) {
+            // Policy allows continuations, check if this is a FailedWithContinuation (task-driven continuation)
+            if let Some(continuation_err) = error.downcast_ref::<FailedWithContinuation>() {
+                debug!(
+                    task_id = %task_id,
+                    attempt_count = current_attempt,
+                    "Task provided FailedWithContinuation and policy allows continuations - {error:?}"
+                );
+
+                // Task has provided a continuation implementation for the next attempt
+                // Clone the Arc to return it in ActionResult::Continue
+                let continuation = continuation_err.continuation.clone();
+
+                // Ask policy whether to reschedule task-driven continuation
+                let should_reschedule = inner.error_policy.should_reschedule(error, context);
+
+                let guard_state = if should_reschedule {
+                    self::GuardState::Reschedule
+                } else {
+                    self::GuardState::Keep
+                };
+
+                return (ActionResult::Continue { continuation }, guard_state);
+            }
+        } else {
             debug!(
                 task_id = %task_id,
                 attempt_count = current_attempt,
-                "Task provided FailedWithContinuation - {error:?}"
+                "Policy rejected continuations, ignoring any FailedWithContinuation - {error:?}"
             );
-
-            // Task has provided a continuation implementation for the next attempt
-            // Clone the Arc to return it in ActionResult::Continue
-            let continuation = continuation_err.continuation.clone();
-
-            return ActionResult::Continue { continuation };
         }
 
         let response = inner.error_policy.on_error(error, context);
 
         match response {
-            ErrorResponse::Fail => ActionResult::Fail,
-            ErrorResponse::Shutdown => ActionResult::Shutdown,
+            ErrorResponse::Fail => (ActionResult::Fail, self::GuardState::Keep),
+            ErrorResponse::Shutdown => (ActionResult::Shutdown, self::GuardState::Keep),
             ErrorResponse::Custom(action) => {
                 debug!("Task failed - executing custom action - {error:?}");
 
@@ -2691,7 +2785,21 @@ impl TaskTrackerInner {
                     .await;
                 debug!(?action_result, "Custom action completed");
 
-                action_result
+                // If the custom action returned Continue, ask policy about rescheduling
+                let guard_state = match &action_result {
+                    ActionResult::Continue { .. } => {
+                        let should_reschedule =
+                            inner.error_policy.should_reschedule(error, context);
+                        if should_reschedule {
+                            self::GuardState::Reschedule
+                        } else {
+                            self::GuardState::Keep
+                        }
+                    }
+                    _ => self::GuardState::Keep, // Fail/Shutdown don't need guard state
+                };
+
+                (action_result, guard_state)
             }
         }
     }
@@ -5498,6 +5606,328 @@ mod tests {
 
         // This demonstrates the limitation: we can't test per-task retry behavior
         // because failures from different tasks affect each other's retry budgets
+    }
+
+    /// Test allow_continuation() policy method with attempt-based logic
+    ///
+    /// This test verifies that:
+    /// 1. Policies can conditionally allow/reject continuations based on context
+    /// 2. When allow_continuation() returns false, FailedWithContinuation is ignored
+    /// 3. When allow_continuation() returns true, FailedWithContinuation is processed normally
+    /// 4. The policy's decision takes precedence over task-provided continuations
+    #[rstest]
+    #[case(
+        3,
+        true,
+        "Policy allows continuations up to 3 attempts - should succeed"
+    )]
+    #[case(
+        2,
+        true,
+        "Policy allows continuations up to 2 attempts - should succeed"
+    )]
+    #[case(0, false, "Policy allows 0 attempts - should fail immediately")]
+    #[tokio::test]
+    async fn test_allow_continuation_policy_control(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        #[case] max_attempts: u32,
+        #[case] should_succeed: bool,
+        #[case] description: &str,
+    ) {
+        // Policy that allows continuations only up to max_attempts
+        #[derive(Debug)]
+        struct AttemptLimitPolicy {
+            max_attempts: u32,
+        }
+
+        impl OnErrorPolicy for AttemptLimitPolicy {
+            fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
+                Arc::new(AttemptLimitPolicy {
+                    max_attempts: self.max_attempts,
+                })
+            }
+
+            fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+                None // Stateless policy
+            }
+
+            fn allow_continuation(&self, _error: &anyhow::Error, context: &OnErrorContext) -> bool {
+                context.attempt_count <= self.max_attempts
+            }
+
+            fn on_error(
+                &self,
+                _error: &anyhow::Error,
+                _context: &mut OnErrorContext,
+            ) -> ErrorResponse {
+                ErrorResponse::Fail // Just fail when continuations are not allowed
+            }
+        }
+
+        let policy = Arc::new(AttemptLimitPolicy { max_attempts });
+        let tracker = TaskTracker::new(unlimited_scheduler, policy).unwrap();
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+
+        // Continuation that always tries to retry
+        #[derive(Debug)]
+        struct AlwaysRetryContinuation {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+            attempt: u32,
+        }
+
+        #[async_trait]
+        impl Continuation for AlwaysRetryContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                self.log
+                    .lock()
+                    .await
+                    .push(format!("continuation_attempt_{}", self.attempt));
+
+                if self.attempt >= 2 {
+                    // Success after 2 attempts
+                    TaskExecutionResult::Success(Box::new("final_success".to_string()))
+                } else {
+                    // Try to continue with another continuation
+                    let next_continuation = Arc::new(AlwaysRetryContinuation {
+                        log: self.log.clone(),
+                        attempt: self.attempt + 1,
+                    });
+                    let error = anyhow::anyhow!("Continuation attempt {} failed", self.attempt);
+                    TaskExecutionResult::Error(FailedWithContinuation::into_anyhow(
+                        error,
+                        next_continuation,
+                    ))
+                }
+            }
+        }
+
+        // Task that immediately fails with a continuation
+        let initial_continuation = Arc::new(AlwaysRetryContinuation {
+            log: execution_log.clone(),
+            attempt: 1,
+        });
+
+        let log_for_task = execution_log.clone();
+        let handle = tracker.spawn(async move {
+            log_for_task
+                .lock()
+                .await
+                .push("initial_task_failure".to_string());
+            let error = anyhow::anyhow!("Initial task failure");
+            let result: Result<String, anyhow::Error> = Err(FailedWithContinuation::into_anyhow(
+                error,
+                initial_continuation,
+            ));
+            result
+        });
+
+        let result = handle.await.expect("Task should complete");
+
+        if should_succeed {
+            assert!(result.is_ok(), "{}: Task should succeed", description);
+            assert_eq!(
+                tracker.metrics().success(),
+                1,
+                "{}: Should have 1 success",
+                description
+            );
+
+            // Should have executed multiple continuations
+            let log = execution_log.lock().await;
+            assert!(
+                log.len() > 2,
+                "{}: Should have multiple log entries",
+                description
+            );
+            assert!(log.contains(&"continuation_attempt_1".to_string()));
+        } else {
+            assert!(result.is_err(), "{}: Task should fail", description);
+            assert_eq!(
+                tracker.metrics().failed(),
+                1,
+                "{}: Should have 1 failure",
+                description
+            );
+
+            // Should have stopped early due to policy rejection
+            let log = execution_log.lock().await;
+            assert_eq!(
+                log.len(),
+                1,
+                "{}: Should only have initial task entry",
+                description
+            );
+            assert_eq!(log[0], "initial_task_failure");
+            // Should NOT contain continuation attempts because policy rejected them
+            assert!(
+                !log.iter()
+                    .any(|entry| entry.contains("continuation_attempt")),
+                "{}: Should not have continuation attempts, but got: {:?}",
+                description,
+                *log
+            );
+        }
+    }
+
+    /// Test should_reschedule() policy method with mock scheduler tracking
+    ///
+    /// This test verifies that:
+    /// 1. When should_reschedule() returns false, the guard is reused (efficient)
+    /// 2. When should_reschedule() returns true, the guard is re-acquired through scheduler
+    /// 3. The scheduler's acquire_execution_slot is called the expected number of times
+    /// 4. Rescheduling works for both task-driven and policy-driven continuations
+    #[rstest]
+    #[case(false, 1, "Policy requests no rescheduling - should reuse guard")]
+    #[case(true, 2, "Policy requests rescheduling - should re-acquire guard")]
+    #[tokio::test]
+    async fn test_should_reschedule_policy_control(
+        #[case] should_reschedule: bool,
+        #[case] expected_acquisitions: u32,
+        #[case] description: &str,
+    ) {
+        // Mock scheduler that tracks acquisition calls
+        #[derive(Debug)]
+        struct MockScheduler {
+            acquisition_count: Arc<AtomicU32>,
+        }
+
+        impl MockScheduler {
+            fn new() -> Self {
+                Self {
+                    acquisition_count: Arc::new(AtomicU32::new(0)),
+                }
+            }
+
+            fn acquisition_count(&self) -> u32 {
+                self.acquisition_count.load(Ordering::Relaxed)
+            }
+        }
+
+        #[async_trait]
+        impl TaskScheduler for MockScheduler {
+            async fn acquire_execution_slot(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> SchedulingResult<Box<dyn ResourceGuard>> {
+                self.acquisition_count.fetch_add(1, Ordering::Relaxed);
+                SchedulingResult::Execute(Box::new(UnlimitedGuard))
+            }
+        }
+
+        // Policy that controls rescheduling behavior
+        #[derive(Debug)]
+        struct RescheduleTestPolicy {
+            should_reschedule: bool,
+        }
+
+        impl OnErrorPolicy for RescheduleTestPolicy {
+            fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
+                Arc::new(RescheduleTestPolicy {
+                    should_reschedule: self.should_reschedule,
+                })
+            }
+
+            fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+                None // Stateless policy
+            }
+
+            fn allow_continuation(
+                &self,
+                _error: &anyhow::Error,
+                _context: &OnErrorContext,
+            ) -> bool {
+                true // Always allow continuations for this test
+            }
+
+            fn should_reschedule(&self, _error: &anyhow::Error, _context: &OnErrorContext) -> bool {
+                self.should_reschedule
+            }
+
+            fn on_error(
+                &self,
+                _error: &anyhow::Error,
+                _context: &mut OnErrorContext,
+            ) -> ErrorResponse {
+                ErrorResponse::Fail // Just fail when continuations are not allowed
+            }
+        }
+
+        let mock_scheduler = Arc::new(MockScheduler::new());
+        let policy = Arc::new(RescheduleTestPolicy { should_reschedule });
+        let tracker = TaskTracker::new(mock_scheduler.clone(), policy).unwrap();
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+
+        // Simple continuation that succeeds on second attempt
+        #[derive(Debug)]
+        struct SimpleRetryContinuation {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl Continuation for SimpleRetryContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                self.log
+                    .lock()
+                    .await
+                    .push("continuation_executed".to_string());
+
+                // Succeed immediately
+                TaskExecutionResult::Success(Box::new("continuation_success".to_string()))
+            }
+        }
+
+        // Task that fails with a continuation
+        let continuation = Arc::new(SimpleRetryContinuation {
+            log: execution_log.clone(),
+        });
+
+        let log_for_task = execution_log.clone();
+        let handle = tracker.spawn(async move {
+            log_for_task
+                .lock()
+                .await
+                .push("initial_task_failure".to_string());
+            let error = anyhow::anyhow!("Initial task failure");
+            let result: Result<String, anyhow::Error> =
+                Err(FailedWithContinuation::into_anyhow(error, continuation));
+            result
+        });
+
+        let result = handle.await.expect("Task should complete");
+
+        // Task should succeed regardless of rescheduling behavior
+        assert!(result.is_ok(), "{}: Task should succeed", description);
+        assert_eq!(
+            tracker.metrics().success(),
+            1,
+            "{}: Should have 1 success",
+            description
+        );
+
+        // Verify the execution log
+        let log = execution_log.lock().await;
+        assert_eq!(
+            log.len(),
+            2,
+            "{}: Should have initial task + continuation",
+            description
+        );
+        assert_eq!(log[0], "initial_task_failure");
+        assert_eq!(log[1], "continuation_executed");
+
+        // Most importantly: verify the scheduler acquisition count
+        let actual_acquisitions = mock_scheduler.acquisition_count();
+        assert_eq!(
+            actual_acquisitions, expected_acquisitions,
+            "{}: Expected {} scheduler acquisitions, got {}",
+            description, expected_acquisitions, actual_acquisitions
+        );
     }
 
     /// Test continuation loop with custom action policies
