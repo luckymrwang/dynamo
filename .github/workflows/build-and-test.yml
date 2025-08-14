@@ -21,7 +21,7 @@ on:
     - main
   pull_request:
 
-# Cancel any previous check runs for the same pull request to avoid redundant workflows.
+# Cancel any previous check runs for the same pull request to avoid redundant workflows. TEST
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.event.pull_request.number) || '' }}
   cancel-in-progress: true
