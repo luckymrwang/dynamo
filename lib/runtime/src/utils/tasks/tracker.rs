@@ -167,6 +167,33 @@
 //! # async fn do_work() -> i32 { 42 }
 //! ```
 //!
+//! ### Task-Driven Retry with Continuations
+//! ```rust
+//! # use dynamo_runtime::utils::tasks::tracker::*;
+//! # use anyhow::anyhow;
+//! # #[tokio::main]
+//! # async fn main() -> anyhow::Result<()> {
+//! # let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new())?;
+//! let handle = tracker.spawn(async {
+//!     // Simulate initial failure with retry logic
+//!     let error = FailedWithContinuation::from_fn(
+//!         anyhow!("Network timeout"),
+//!         || async {
+//!             println!("Retrying with exponential backoff...");
+//!             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+//!             Ok("Success after retry".to_string())
+//!         }
+//!     );
+//!     let result: Result<String, anyhow::Error> = Err(error);
+//!     result
+//! });
+//!
+//! let result = handle.await?;
+//! assert!(result.is_ok());
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ### Custom Error Policy with Continuation
 //! ```rust
 //! # use dynamo_runtime::utils::tasks::tracker::*;
@@ -471,6 +498,73 @@ impl FailedWithContinuation {
     ) -> anyhow::Error {
         anyhow::Error::new(Self::new(source, continuation))
     }
+
+    /// Create a FailedWithContinuation from a simple async function (no cancellation support)
+    ///
+    /// This is a convenience method for creating continuation errors from simple async closures
+    /// that don't need to handle cancellation. The function will be executed when the
+    /// continuation is triggered.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use dynamo_runtime::utils::tasks::tracker::*;
+    /// # use anyhow::anyhow;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let error = FailedWithContinuation::from_fn(
+    ///     anyhow!("Initial task failed"),
+    ///     || async {
+    ///         println!("Retrying operation...");
+    ///         Ok("retry_result".to_string())
+    ///     }
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_fn<F, Fut, T>(source: anyhow::Error, f: F) -> anyhow::Error
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let continuation = Arc::new(FnContinuation { f: Box::new(f) });
+        Self::into_anyhow(source, continuation)
+    }
+
+    /// Create a FailedWithContinuation from a cancellable async function
+    ///
+    /// This is a convenience method for creating continuation errors from async closures
+    /// that can handle cancellation. The function receives a CancellationToken
+    /// and should check it periodically for cooperative cancellation.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use dynamo_runtime::utils::tasks::tracker::*;
+    /// # use anyhow::anyhow;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let error = FailedWithContinuation::from_cancellable(
+    ///     anyhow!("Initial task failed"),
+    ///     |cancel_token| async move {
+    ///         if cancel_token.is_cancelled() {
+    ///             return Err(anyhow!("Cancelled"));
+    ///         }
+    ///         println!("Retrying operation with cancellation support...");
+    ///         Ok("retry_result".to_string())
+    ///     }
+    /// );
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn from_cancellable<F, Fut, T>(source: anyhow::Error, f: F) -> anyhow::Error
+    where
+        F: Fn(CancellationToken) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+        T: Send + 'static,
+    {
+        let continuation = Arc::new(CancellableFnContinuation { f: Box::new(f) });
+        Self::into_anyhow(source, continuation)
+    }
 }
 
 /// Extension trait for extracting FailedWithContinuation from anyhow::Error
@@ -500,6 +594,68 @@ impl FailedWithContinuationExt for anyhow::Error {
 
     fn has_continuation(&self) -> bool {
         self.downcast_ref::<FailedWithContinuation>().is_some()
+    }
+}
+
+/// Implementation of Continuation for simple async functions (no cancellation support)
+struct FnContinuation<F> {
+    f: Box<F>,
+}
+
+impl<F> std::fmt::Debug for FnContinuation<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FnContinuation")
+            .field("f", &"<closure>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<F, Fut, T> Continuation for FnContinuation<F>
+where
+    F: Fn() -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+    T: Send + 'static,
+{
+    async fn execute(
+        &self,
+        _cancel_token: CancellationToken,
+    ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+        match (self.f)().await {
+            Ok(result) => TaskExecutionResult::Success(Box::new(result)),
+            Err(error) => TaskExecutionResult::Error(error),
+        }
+    }
+}
+
+/// Implementation of Continuation for cancellable async functions
+struct CancellableFnContinuation<F> {
+    f: Box<F>,
+}
+
+impl<F> std::fmt::Debug for CancellableFnContinuation<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CancellableFnContinuation")
+            .field("f", &"<closure>")
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<F, Fut, T> Continuation for CancellableFnContinuation<F>
+where
+    F: Fn(CancellationToken) -> Fut + Send + Sync + 'static,
+    Fut: std::future::Future<Output = Result<T, anyhow::Error>> + Send + 'static,
+    T: Send + 'static,
+{
+    async fn execute(
+        &self,
+        cancel_token: CancellationToken,
+    ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+        match (self.f)(cancel_token).await {
+            Ok(result) => TaskExecutionResult::Success(Box::new(result)),
+            Err(error) => TaskExecutionResult::Error(error),
+        }
     }
 }
 
