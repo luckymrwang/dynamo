@@ -5947,6 +5947,59 @@ mod tests {
         }
     }
 
+    /// Test FailedWithContinuation helper methods
+    ///
+    /// This test verifies that:
+    /// 1. from_fn creates working continuations from simple closures
+    /// 2. from_cancellable creates working continuations from cancellable closures
+    /// 3. Both helpers integrate correctly with the task execution system
+    #[tokio::test]
+    async fn test_continuation_helpers() {
+        let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
+
+        // Test from_fn helper
+        let handle1 = tracker.spawn(async {
+            let error =
+                FailedWithContinuation::from_fn(anyhow::anyhow!("Initial failure"), || async {
+                    Ok("Success from from_fn".to_string())
+                });
+            let result: Result<String, anyhow::Error> = Err(error);
+            result
+        });
+
+        let result1 = handle1.await.expect("Task should complete");
+        assert!(
+            result1.is_ok(),
+            "Task with from_fn continuation should succeed"
+        );
+        assert_eq!(result1.unwrap(), "Success from from_fn");
+
+        // Test from_cancellable helper
+        let handle2 = tracker.spawn(async {
+            let error = FailedWithContinuation::from_cancellable(
+                anyhow::anyhow!("Initial failure"),
+                |_cancel_token| async move { Ok("Success from from_cancellable".to_string()) },
+            );
+            let result: Result<String, anyhow::Error> = Err(error);
+            result
+        });
+
+        let result2 = handle2.await.expect("Task should complete");
+        assert!(
+            result2.is_ok(),
+            "Task with from_cancellable continuation should succeed"
+        );
+        assert_eq!(result2.unwrap(), "Success from from_cancellable");
+
+        // Verify metrics
+        assert_eq!(
+            tracker.metrics().success(),
+            2,
+            "Should have 2 successful tasks"
+        );
+        assert_eq!(tracker.metrics().failed(), 0, "Should have 0 failed tasks");
+    }
+
     /// Test should_reschedule() policy method with mock scheduler tracking
     ///
     /// This test verifies that:
