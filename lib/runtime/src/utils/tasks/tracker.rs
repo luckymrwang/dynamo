@@ -77,7 +77,14 @@
 //!
 //! ### Regular Tasks
 //! ```rust
+//! # use dynamo_runtime::utils::tasks::tracker::*;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 //! let handle = tracker.spawn(async { Ok(42) });
+//! # let _result = handle.await?;
+//! # Ok(())
+//! # }
 //! ```
 //! - Simple futures that run to completion
 //! - Cannot be retried (future is consumed on first execution)
@@ -85,10 +92,17 @@
 //!
 //! ### Cancellable Tasks
 //! ```rust
+//! # use dynamo_runtime::utils::tasks::tracker::*;
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! # let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
 //! let handle = tracker.spawn_cancellable(|cancel_token| async move {
 //!     // Task can check cancel_token.is_cancelled() or use tokio::select!
 //!     CancellableTaskResult::Ok(42)
 //! });
+//! # let _result = handle.await?;
+//! # Ok(())
+//! # }
 //! ```
 //! - Receive a `CancellationToken` for cooperative cancellation
 //! - Support retry via `FnMut` closures (can be called multiple times)
@@ -153,11 +167,11 @@
 //! # async fn do_work() -> i32 { 42 }
 //! ```
 //!
-//! ### Custom Error Policy with Retry
+//! ### Custom Error Policy with Continuation
 //! ```rust
 //! # use dynamo_runtime::utils::tasks::tracker::*;
 //! # use std::sync::Arc;
-//! # use std::time::Duration;
+//! # use async_trait::async_trait;
 //! # #[derive(Debug)]
 //! struct RetryPolicy {
 //!     max_attempts: u32,
@@ -168,28 +182,33 @@
 //!         Arc::new(RetryPolicy { max_attempts: self.max_attempts })
 //!     }
 //!
-//!     fn on_error(&self, _error: &anyhow::Error, _task_id: TaskId) -> ErrorResponse {
-//!         ErrorResponse::Custom(Box::new(RetryAction { max_attempts: self.max_attempts }))
+//!     fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+//!         None // Stateless policy
+//!     }
+//!
+//!     fn on_error(&self, _error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
+//!         if context.attempt_count < self.max_attempts {
+//!             ErrorResponse::Custom(Box::new(RetryAction))
+//!         } else {
+//!             ErrorResponse::Fail
+//!         }
 //!     }
 //! }
 //!
 //! # #[derive(Debug)]
-//! struct RetryAction { max_attempts: u32 }
+//! struct RetryAction;
 //!
+//! #[async_trait]
 //! impl OnErrorAction for RetryAction {
 //!     async fn execute(
 //!         &self,
 //!         _error: &anyhow::Error,
 //!         _task_id: TaskId,
-//!         attempt_count: u32,
+//!         _attempt_count: u32,
 //!         _context: &TaskExecutionContext,
 //!     ) -> ActionResult {
-//!         if attempt_count < self.max_attempts {
-//!             // Create next executor and return it (implementation details in Phase 2-4)
-//!             ActionResult::Continue { continuation: /* next_continuation */ }
-//!         } else {
-//!             ActionResult::Fail
-//!         }
+//!         // In practice, you would create a continuation here
+//!         ActionResult::Fail
 //!     }
 //! }
 //! ```
@@ -214,10 +233,10 @@
 //! # async fn example() -> anyhow::Result<()> {
 //! // Create root tracker with failure threshold policy
 //! let error_policy = ThresholdCancelPolicy::with_threshold(5);
-//! let root = std::sync::Arc::new(TaskTracker::builder()
+//! let root = TaskTracker::builder()
 //!     .scheduler(UnlimitedScheduler::new())
 //!     .error_policy(error_policy)
-//!     .build()?);
+//!     .build()?;
 //!
 //! // Create child trackers for different components
 //! let api_handler = root.child_tracker()?;  // Inherits policies
