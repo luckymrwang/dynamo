@@ -32,12 +32,12 @@
 //! OnErrorPolicy::on_error(error, task_id) -> ErrorResponse
 //! ```
 //!
-//! - **ErrorResponse::Continue**: Log error, continue execution
-//! - **ErrorResponse::Cancel**: Cancel tracker and all children
+//! - **ErrorResponse::Fail**: Log error, fail this task
+//! - **ErrorResponse::Shutdown**: Shutdown tracker and all children
 //! - **ErrorResponse::Custom(action)**: Execute custom logic that can return:
-//!   - `ActionResult::Continue`: Handle error and continue
-//!   - `ActionResult::Cancel`: Cancel tracker
-//!   - `ActionResult::ExecuteNext { executor }`: Execute provided task executor
+//!   - `ActionResult::Fail`: Handle error and fail the task
+//!   - `ActionResult::Shutdown`: Shutdown tracker
+//!   - `ActionResult::Continue { continuation }`: Continue with provided task
 //!
 //! ### 3. **Execution Pipeline** - Task Orchestration
 //!
@@ -71,7 +71,7 @@
 //! ### **Retry Support**
 //! - Regular tasks (`spawn`): Cannot be retried (future is consumed)
 //! - Cancellable tasks (`spawn_cancellable`): Support retry via `FnMut` closures
-//! - Error policies can provide next executors via `ActionResult::ExecuteNext`
+//! - Error policies can provide next executors via `ActionResult::Continue`
 //!
 //! ## Task Types
 //!
@@ -186,9 +186,9 @@
 //!     ) -> ActionResult {
 //!         if attempt_count < self.max_attempts {
 //!             // Create next executor and return it (implementation details in Phase 2-4)
-//!             ActionResult::ExecuteNext { executor: /* next_executor */ }
+//!             ActionResult::Continue { continuation: /* next_continuation */ }
 //!         } else {
-//!             ActionResult::Continue
+//!             ActionResult::Fail
 //!         }
 //!     }
 //! }
@@ -698,11 +698,11 @@ pub enum ErrorPolicy {
 /// Currently provides minimal functionality with planned extensions for common patterns.
 #[derive(Debug)]
 pub enum ErrorResponse {
-    /// Continue normal execution, the error counter will be incremented, but task tracker will not be cancelled.
-    Continue,
+    /// Just fail this task - error will be logged/counted, but tracker continues
+    Fail,
 
-    /// Cancel this tracker and all child trackers
-    Cancel,
+    /// Shutdown this tracker and all child trackers
+    Shutdown,
 
     /// Execute custom error handling logic with full context access
     Custom(Box<dyn OnErrorAction>),
@@ -758,16 +758,26 @@ pub trait OnErrorAction: Send + Sync + std::fmt::Debug {
 /// Result of a custom error action execution
 #[derive(Debug)]
 pub enum ActionResult {
-    /// Continue normal execution (error was handled)
-    Continue,
+    /// Just fail this task (error was logged/handled by policy)
+    ///
+    /// This means the policy has handled the error appropriately (e.g., logged it,
+    /// updated metrics, etc.) and the task should fail with this error.
+    /// The task execution terminates here.
+    Fail,
 
-    /// Execute the provided continuation task (retry/fallback/transformation)
-    ExecuteNext {
+    /// Continue execution with the provided task
+    ///
+    /// This provides a new executable to continue the retry loop with.
+    /// The task execution continues with the provided continuation.
+    Continue {
         continuation: Arc<dyn Continuation + Send + Sync + 'static>,
     },
 
-    /// Cancel this tracker and all child trackers
-    Cancel,
+    /// Shutdown this tracker and all child trackers
+    ///
+    /// This triggers shutdown of the entire tracker hierarchy.
+    /// All running and pending tasks will be cancelled.
+    Shutdown,
 }
 
 /// Execution context provided to custom error actions
@@ -2555,18 +2565,18 @@ impl TaskTrackerInner {
                                     .await;
 
                             match action_result {
-                                ActionResult::Continue => {
+                                ActionResult::Fail => {
                                     inner.metrics.increment_failed();
-                                    debug!("Policy decided to continue - task failed {error:?}");
+                                    debug!("Policy accepted error - task failed {error:?}");
                                     return Err(TaskError::Failed(error));
                                 }
-                                ActionResult::Cancel => {
+                                ActionResult::Shutdown => {
                                     inner.metrics.increment_failed();
-                                    warn!("Policy triggered cancellation - {error:?}");
+                                    warn!("Policy triggered shutdown - {error:?}");
                                     inner.cancel();
                                     return Err(TaskError::Failed(error));
                                 }
-                                ActionResult::ExecuteNext { continuation } => {
+                                ActionResult::Continue { continuation } => {
                                     debug!(
                                         "Policy provided next executable - continuing loop - {error:?}"
                                     );
@@ -2614,18 +2624,18 @@ impl TaskTrackerInner {
             );
 
             // Task has provided a continuation implementation for the next attempt
-            // Clone the Arc to return it in ActionResult::ExecuteNext
+            // Clone the Arc to return it in ActionResult::Continue
             let continuation = continuation_err.continuation.clone();
 
-            return ActionResult::ExecuteNext { continuation };
+            return ActionResult::Continue { continuation };
         }
 
         // Not a FailedWithContinuation, proceed with normal policy handling
         let response = inner.error_policy.on_error(error, task_id);
 
         match response {
-            ErrorResponse::Continue => ActionResult::Continue,
-            ErrorResponse::Cancel => ActionResult::Cancel,
+            ErrorResponse::Fail => ActionResult::Fail,
+            ErrorResponse::Shutdown => ActionResult::Shutdown,
             ErrorResponse::Custom(action) => {
                 debug!("Task failed - executing custom action - {error:?}");
 
@@ -2821,7 +2831,7 @@ impl TaskScheduler for SemaphoreScheduler {
 
 /// Error policy that triggers cancellation based on error patterns
 ///
-/// This policy analyzes error messages and returns `ErrorResponse::Cancel` when:
+/// This policy analyzes error messages and returns `ErrorResponse::Shutdown` when:
 /// - No patterns are specified (cancels on any error)
 /// - Error message matches one of the specified patterns
 ///
@@ -2879,7 +2889,7 @@ impl OnErrorPolicy for CancelOnError {
         error!(?task_id, "Task failed - {error:?}");
 
         if self.error_patterns.is_empty() {
-            return ErrorResponse::Cancel;
+            return ErrorResponse::Shutdown;
         }
 
         // Check if this error should trigger cancellation
@@ -2890,9 +2900,9 @@ impl OnErrorPolicy for CancelOnError {
             .any(|pattern| error_str.contains(pattern));
 
         if should_cancel {
-            ErrorResponse::Cancel
+            ErrorResponse::Shutdown
         } else {
-            ErrorResponse::Continue
+            ErrorResponse::Fail
         }
     }
 }
@@ -2925,7 +2935,7 @@ impl OnErrorPolicy for LogOnlyPolicy {
 
     fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
         error!(?task_id, "Task failed - logging only - {error:?}");
-        ErrorResponse::Continue
+        ErrorResponse::Fail
     }
 }
 
@@ -2963,6 +2973,14 @@ impl ThresholdCancelPolicy {
     pub fn failure_count(&self) -> u64 {
         self.failure_count.load(Ordering::Relaxed)
     }
+
+    /// Reset the failure count to zero
+    ///
+    /// This is primarily useful for testing scenarios where you want to reset
+    /// the policy state between test cases.
+    pub fn reset_failure_count(&self) {
+        self.failure_count.store(0, Ordering::Relaxed);
+    }
 }
 
 impl OnErrorPolicy for ThresholdCancelPolicy {
@@ -2986,7 +3004,7 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
                 max_failures = self.max_failures,
                 "Failure threshold exceeded, triggering cancellation"
             );
-            ErrorResponse::Cancel
+            ErrorResponse::Shutdown
         } else {
             debug!(
                 ?task_id,
@@ -2994,7 +3012,7 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
                 max_failures = self.max_failures,
                 "Task failed, tracking failure count"
             );
-            ErrorResponse::Continue
+            ErrorResponse::Fail
         }
     }
 }
@@ -3093,7 +3111,7 @@ impl OnErrorPolicy for RateCancelPolicy {
             "Rate-based error policy - time window tracking not yet implemented"
         );
 
-        ErrorResponse::Continue
+        ErrorResponse::Fail
     }
 }
 
@@ -3130,7 +3148,7 @@ impl OnErrorAction for TriggerCancellationTokenAction {
         self.cancel_token.cancel();
 
         // Return success - the action completed successfully
-        ActionResult::Cancel
+        ActionResult::Shutdown
     }
 }
 
@@ -4529,21 +4547,21 @@ mod tests {
     fn test_action_result_variants() {
         // Test that ActionResult variants can be created and pattern matched
 
-        // Test Continue variant
-        let continue_result = ActionResult::Continue;
-        match continue_result {
-            ActionResult::Continue => {} // Expected
-            _ => panic!("Expected Continue variant"),
+        // Test Fail variant
+        let fail_result = ActionResult::Fail;
+        match fail_result {
+            ActionResult::Fail => {} // Expected
+            _ => panic!("Expected Fail variant"),
         }
 
-        // Test Cancel variant
-        let cancel_result = ActionResult::Cancel;
-        match cancel_result {
-            ActionResult::Cancel => {} // Expected
-            _ => panic!("Expected Cancel variant"),
+        // Test Shutdown variant
+        let shutdown_result = ActionResult::Shutdown;
+        match shutdown_result {
+            ActionResult::Shutdown => {} // Expected
+            _ => panic!("Expected Shutdown variant"),
         }
 
-        // Test ExecuteNext variant with Restartable
+        // Test Continue variant with Continuation
         #[derive(Debug)]
         struct TestRestartable;
 
@@ -4558,16 +4576,16 @@ mod tests {
         }
 
         let test_restartable = Arc::new(TestRestartable);
-        let execute_next_result = ActionResult::ExecuteNext {
+        let continue_result = ActionResult::Continue {
             continuation: test_restartable,
         };
 
-        match execute_next_result {
-            ActionResult::ExecuteNext { continuation } => {
+        match continue_result {
+            ActionResult::Continue { continuation } => {
                 // Verify we have a valid Continuation
                 assert!(format!("{:?}", continuation).contains("TestRestartable"));
             }
-            _ => panic!("Expected ExecuteNext variant"),
+            _ => panic!("Expected Continue variant"),
         }
     }
 
@@ -4807,5 +4825,920 @@ mod tests {
         // Verify we cannot downcast to FailedWithContinuation
         let continuation_ref = regular_error.downcast_ref::<FailedWithContinuation>();
         assert!(continuation_ref.is_none());
+    }
+
+    // ========================================
+    // END-TO-END ACTIONRESULT TESTS
+    // ========================================
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_end_to_end_continuation_execution(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
+        // Test that a task returning FailedWithContinuation actually executes the continuation
+        let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
+
+        // Shared state to track execution
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let log_clone = execution_log.clone();
+
+        // Create a continuation that logs its execution
+        #[derive(Debug)]
+        struct LoggingContinuation {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+            result: String,
+        }
+
+        #[async_trait]
+        impl Continuation for LoggingContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                self.log
+                    .lock()
+                    .await
+                    .push("continuation_executed".to_string());
+                TaskExecutionResult::Success(Box::new(self.result.clone()))
+            }
+        }
+
+        let continuation = Arc::new(LoggingContinuation {
+            log: log_clone,
+            result: "continuation_result".to_string(),
+        });
+
+        // Task that fails with continuation
+        let log_for_task = execution_log.clone();
+        let handle = tracker.spawn(async move {
+            log_for_task
+                .lock()
+                .await
+                .push("original_task_executed".to_string());
+
+            // Return FailedWithContinuation
+            let error = anyhow::anyhow!("Original task failed");
+            let result: Result<String, anyhow::Error> =
+                Err(FailedWithContinuation::into_anyhow(error, continuation));
+            result
+        });
+
+        // Execute and verify the continuation was called
+        let result = handle.await.expect("Task should complete");
+        assert!(result.is_ok(), "Continuation should succeed");
+
+        // Verify execution order
+        let log = execution_log.lock().await;
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0], "original_task_executed");
+        assert_eq!(log[1], "continuation_executed");
+
+        // Verify metrics - should show 1 success (from continuation)
+        assert_eq!(tracker.metrics().success(), 1);
+        assert_eq!(tracker.metrics().failed(), 0); // Continuation succeeded
+        assert_eq!(tracker.metrics().cancelled(), 0);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_end_to_end_multiple_continuations(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
+        // Test multiple continuation attempts
+        let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
+
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let attempt_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Continuation that fails twice, then succeeds
+        #[derive(Debug)]
+        struct RetryingContinuation {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+            attempt_count: Arc<std::sync::atomic::AtomicU32>,
+        }
+
+        #[async_trait]
+        impl Continuation for RetryingContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                let attempt = self
+                    .attempt_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                self.log
+                    .lock()
+                    .await
+                    .push(format!("continuation_attempt_{}", attempt));
+
+                if attempt < 3 {
+                    // Fail with another continuation
+                    let next_continuation = Arc::new(RetryingContinuation {
+                        log: self.log.clone(),
+                        attempt_count: self.attempt_count.clone(),
+                    });
+                    let error = anyhow::anyhow!("Continuation attempt {} failed", attempt);
+                    TaskExecutionResult::Error(FailedWithContinuation::into_anyhow(
+                        error,
+                        next_continuation,
+                    ))
+                } else {
+                    // Succeed on third attempt
+                    TaskExecutionResult::Success(Box::new(format!(
+                        "success_on_attempt_{}",
+                        attempt
+                    )))
+                }
+            }
+        }
+
+        let initial_continuation = Arc::new(RetryingContinuation {
+            log: execution_log.clone(),
+            attempt_count: attempt_count.clone(),
+        });
+
+        // Task that immediately fails with continuation
+        let handle = tracker.spawn(async move {
+            let error = anyhow::anyhow!("Original task failed");
+            let result: Result<String, anyhow::Error> = Err(FailedWithContinuation::into_anyhow(
+                error,
+                initial_continuation,
+            ));
+            result
+        });
+
+        // Execute and verify multiple continuations
+        let result = handle.await.expect("Task should complete");
+        assert!(result.is_ok(), "Final continuation should succeed");
+
+        // Verify all attempts were made
+        let log = execution_log.lock().await;
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0], "continuation_attempt_1");
+        assert_eq!(log[1], "continuation_attempt_2");
+        assert_eq!(log[2], "continuation_attempt_3");
+
+        // Verify final attempt count
+        assert_eq!(attempt_count.load(std::sync::atomic::Ordering::Relaxed), 3);
+
+        // Verify metrics - should show 1 success (final continuation)
+        assert_eq!(tracker.metrics().success(), 1);
+        assert_eq!(tracker.metrics().failed(), 0);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_end_to_end_continuation_failure(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
+        // Test continuation that ultimately fails without providing another continuation
+        let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
+
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let log_clone = execution_log.clone();
+
+        // Continuation that fails without providing another continuation
+        #[derive(Debug)]
+        struct FailingContinuation {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl Continuation for FailingContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                self.log
+                    .lock()
+                    .await
+                    .push("continuation_failed".to_string());
+                TaskExecutionResult::Error(anyhow::anyhow!("Continuation failed permanently"))
+            }
+        }
+
+        let continuation = Arc::new(FailingContinuation { log: log_clone });
+
+        // Task that fails with continuation
+        let log_for_task = execution_log.clone();
+        let handle = tracker.spawn(async move {
+            log_for_task
+                .lock()
+                .await
+                .push("original_task_executed".to_string());
+
+            let error = anyhow::anyhow!("Original task failed");
+            let result: Result<String, anyhow::Error> =
+                Err(FailedWithContinuation::into_anyhow(error, continuation));
+            result
+        });
+
+        // Execute and verify the continuation failed
+        let result = handle.await.expect("Task should complete");
+        assert!(result.is_err(), "Continuation should fail");
+
+        // Verify execution order
+        let log = execution_log.lock().await;
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0], "original_task_executed");
+        assert_eq!(log[1], "continuation_failed");
+
+        // Verify metrics - should show 1 failure (from continuation)
+        assert_eq!(tracker.metrics().success(), 0);
+        assert_eq!(tracker.metrics().failed(), 1);
+        assert_eq!(tracker.metrics().cancelled(), 0);
+    }
+
+    #[rstest]
+    #[tokio::test]
+    async fn test_end_to_end_all_action_result_variants(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+    ) {
+        // Comprehensive test of Fail, Shutdown, and Continue paths
+
+        // Test 1: ActionResult::Fail (via LogOnlyPolicy)
+        {
+            let tracker =
+                TaskTracker::new(unlimited_scheduler.clone(), LogOnlyPolicy::new()).unwrap();
+            let handle = tracker.spawn(async {
+                let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Test error"));
+                result
+            });
+            let result = handle.await.expect("Task should complete");
+            assert!(result.is_err(), "LogOnly should let error through");
+            assert_eq!(tracker.metrics().failed(), 1);
+        }
+
+        // Test 2: ActionResult::Shutdown (via CancelOnError)
+        {
+            let tracker =
+                TaskTracker::new(unlimited_scheduler.clone(), CancelOnError::new()).unwrap();
+            let handle = tracker.spawn(async {
+                let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Test error"));
+                result
+            });
+            let result = handle.await.expect("Task should complete");
+            assert!(result.is_err(), "CancelOnError should fail task");
+            assert!(
+                tracker.cancellation_token().is_cancelled(),
+                "Should cancel tracker"
+            );
+            assert_eq!(tracker.metrics().failed(), 1);
+        }
+
+        // Test 3: ActionResult::Continue (via FailedWithContinuation)
+        {
+            let tracker =
+                TaskTracker::new(unlimited_scheduler.clone(), LogOnlyPolicy::new()).unwrap();
+
+            #[derive(Debug)]
+            struct TestContinuation;
+
+            #[async_trait]
+            impl Continuation for TestContinuation {
+                async fn execute(
+                    &self,
+                    _cancel_token: CancellationToken,
+                ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                    TaskExecutionResult::Success(Box::new("continuation_success".to_string()))
+                }
+            }
+
+            let continuation = Arc::new(TestContinuation);
+            let handle = tracker.spawn(async move {
+                let error = anyhow::anyhow!("Original failure");
+                let result: Result<String, anyhow::Error> =
+                    Err(FailedWithContinuation::into_anyhow(error, continuation));
+                result
+            });
+
+            let result = handle.await.expect("Task should complete");
+            assert!(result.is_ok(), "Continuation should succeed");
+            assert_eq!(tracker.metrics().success(), 1);
+            assert_eq!(tracker.metrics().failed(), 0);
+        }
+    }
+
+    // ========================================
+    // LOOP BEHAVIOR AND POLICY INTERACTION TESTS
+    // ========================================
+    //
+    // These tests demonstrate the current ActionResult system and identify
+    // areas for future improvement:
+    //
+    // ✅ WHAT WORKS:
+    // - All ActionResult variants (Continue, Cancel, ExecuteNext) are tested
+    // - Task-driven continuations work correctly
+    // - Policy-driven continuations work correctly
+    // - Mixed continuation sources work correctly
+    // - Loop behavior with resource management works correctly
+    //
+    // 🔄 CURRENT LIMITATIONS:
+    // - ThresholdCancelPolicy tracks failures GLOBALLY, not per-task
+    // - OnErrorPolicy doesn't receive attempt_count parameter
+    // - No per-task context for stateful retry policies
+    //
+    // 🚀 FUTURE IMPROVEMENTS IDENTIFIED:
+    // - Add OnErrorContext associated type for per-task state
+    // - Pass attempt_count to OnErrorPolicy::on_error
+    // - Enable per-task failure tracking, backoff timers, etc.
+    //
+    // The tests below demonstrate both current capabilities and limitations.
+
+    /// Test retry loop behavior with different policies and continuation counts
+    ///
+    /// This test verifies that:
+    /// 1. Tasks can provide multiple continuations in sequence
+    /// 2. Different error policies can limit the number of continuation attempts
+    /// 3. The retry loop correctly handles policy decisions about when to stop
+    ///
+    /// Key insight: Policies are only consulted for regular errors, not FailedWithContinuation.
+    /// So we need continuations that eventually fail with regular errors to test policy limits.
+    ///
+    /// DESIGN LIMITATION: Current ThresholdCancelPolicy tracks failures GLOBALLY across all tasks,
+    /// not per-task. This test demonstrates the current behavior but isn't ideal for retry loop testing.
+    ///
+    /// FUTURE IMPROVEMENT: Add OnErrorContext associated type to OnErrorPolicy:
+    /// ```rust
+    /// trait OnErrorPolicy {
+    ///     type Context: Default + Send + Sync;
+    ///     fn on_error(&self, error: &anyhow::Error, task_id: TaskId,
+    ///                 attempt_count: u32, context: &mut Self::Context) -> ErrorResponse;
+    /// }
+    /// ```
+    /// This would enable per-task failure tracking, backoff timers, etc.
+    ///
+    /// NOTE: Uses fresh policy instance for each test case to avoid global state interference.
+    #[rstest]
+    #[case(
+        1,
+        false,
+        "Global policy with max_failures=1 should stop after first regular error"
+    )]
+    #[case(
+        2,
+        false,  // Actually fails - ActionResult::Fail accepts the error and fails the task
+        "Global policy with max_failures=2 allows error but ActionResult::Fail still fails the task"
+    )]
+    #[tokio::test]
+    async fn test_continuation_loop_with_global_threshold_policy(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        #[case] max_failures: usize,
+        #[case] should_succeed: bool,
+        #[case] description: &str,
+    ) {
+        // Task that provides continuations, but continuations fail with regular errors
+        // so the policy gets consulted and can limit retries
+
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let attempt_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Create a continuation that fails with regular errors (not FailedWithContinuation)
+        // This allows the policy to be consulted and potentially stop the retries
+        #[derive(Debug)]
+        struct PolicyTestContinuation {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+            attempt_counter: Arc<std::sync::atomic::AtomicU32>,
+            max_attempts_before_success: u32,
+        }
+
+        #[async_trait]
+        impl Continuation for PolicyTestContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                let attempt = self
+                    .attempt_counter
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                self.log
+                    .lock()
+                    .await
+                    .push(format!("continuation_attempt_{}", attempt));
+
+                if attempt < self.max_attempts_before_success {
+                    // Fail with regular error - this will be seen by the policy
+                    TaskExecutionResult::Error(anyhow::anyhow!(
+                        "Continuation attempt {} failed (regular error)",
+                        attempt
+                    ))
+                } else {
+                    // Succeed after enough attempts
+                    TaskExecutionResult::Success(Box::new(format!(
+                        "success_on_attempt_{}",
+                        attempt
+                    )))
+                }
+            }
+        }
+
+        // Create fresh policy instance for each test case to avoid global state interference
+        let policy = ThresholdCancelPolicy::with_threshold(max_failures);
+        let tracker = TaskTracker::new(unlimited_scheduler, policy).unwrap();
+
+        // Original task that fails with continuation
+        let log_for_task = execution_log.clone();
+        // Set max_attempts_before_success so that:
+        // - For max_failures=1: Continuation fails 1 time (attempt 1), policy cancels after 1 failure
+        // - For max_failures=2: Continuation fails 1 time (attempt 1), succeeds on attempt 2
+        let continuation = Arc::new(PolicyTestContinuation {
+            log: execution_log.clone(),
+            attempt_counter: attempt_counter.clone(),
+            max_attempts_before_success: 2, // Always fail on attempt 1, succeed on attempt 2
+        });
+
+        let handle = tracker.spawn(async move {
+            log_for_task
+                .lock()
+                .await
+                .push("original_task_executed".to_string());
+            let error = anyhow::anyhow!("Original task failed");
+            let result: Result<String, anyhow::Error> =
+                Err(FailedWithContinuation::into_anyhow(error, continuation));
+            result
+        });
+
+        // Execute and check result based on policy
+        let result = handle.await.expect("Task should complete");
+
+        // Debug: Print actual results
+        let log = execution_log.lock().await;
+        let final_attempt_count = attempt_counter.load(std::sync::atomic::Ordering::Relaxed);
+        println!(
+            "Test case: max_failures={}, should_succeed={}",
+            max_failures, should_succeed
+        );
+        println!("Result: {:?}", result.is_ok());
+        println!("Log entries: {:?}", log);
+        println!("Attempt count: {}", final_attempt_count);
+        println!(
+            "Metrics: success={}, failed={}",
+            tracker.metrics().success(),
+            tracker.metrics().failed()
+        );
+        drop(log); // Release the lock
+
+        // Both test cases should fail because ActionResult::Fail accepts the error and fails the task
+        assert!(result.is_err(), "{}: Task should fail", description);
+        assert_eq!(
+            tracker.metrics().success(),
+            0,
+            "{}: Should have 0 successes",
+            description
+        );
+        assert_eq!(
+            tracker.metrics().failed(),
+            1,
+            "{}: Should have 1 failure",
+            description
+        );
+
+        // Should have stopped after 1 continuation attempt because ActionResult::Fail fails the task
+        let log = execution_log.lock().await;
+        assert_eq!(
+            log.len(),
+            2,
+            "{}: Should have 2 log entries (original + 1 continuation attempt)",
+            description
+        );
+        assert_eq!(log[0], "original_task_executed");
+        assert_eq!(log[1], "continuation_attempt_1");
+
+        assert_eq!(
+            attempt_counter.load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "{}: Should have made 1 continuation attempt",
+            description
+        );
+
+        // The key difference is whether the tracker gets cancelled
+        if max_failures == 1 {
+            assert!(
+                tracker.cancellation_token().is_cancelled(),
+                "Tracker should be cancelled with max_failures=1"
+            );
+        } else {
+            assert!(
+                !tracker.cancellation_token().is_cancelled(),
+                "Tracker should NOT be cancelled with max_failures=2 (policy allows the error)"
+            );
+        }
+    }
+
+    /// Simple test to understand ThresholdCancelPolicy behavior
+    #[rstest]
+    #[tokio::test]
+    async fn test_simple_threshold_policy_behavior(unlimited_scheduler: Arc<UnlimitedScheduler>) {
+        // Test with max_failures=2 - should allow 2 failures before canceling
+        let policy = ThresholdCancelPolicy::with_threshold(2);
+        let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
+
+        // Task 1: Should fail and continue (failure count = 1)
+        let handle1 = tracker.spawn(async {
+            let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("First failure"));
+            result
+        });
+        let result1 = handle1.await.expect("Task should complete");
+        assert!(result1.is_err(), "First task should fail");
+        assert!(
+            !tracker.cancellation_token().is_cancelled(),
+            "Should not be cancelled after 1 failure"
+        );
+
+        // Task 2: Should fail and trigger cancellation (failure count = 2)
+        let handle2 = tracker.spawn(async {
+            let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Second failure"));
+            result
+        });
+        let result2 = handle2.await.expect("Task should complete");
+        assert!(result2.is_err(), "Second task should fail");
+        assert!(
+            tracker.cancellation_token().is_cancelled(),
+            "Should be cancelled after 2 failures"
+        );
+
+        println!("Policy failure count: {}", policy.failure_count());
+        assert_eq!(
+            policy.failure_count(),
+            2,
+            "Policy should have counted 2 failures"
+        );
+    }
+
+    /// Test demonstrating the need for per-task error context
+    ///
+    /// This test shows why we need OnErrorContext - the current global failure tracking
+    /// doesn't work well for testing individual task retry behavior.
+    #[rstest]
+    #[tokio::test]
+    async fn test_per_task_context_limitation_demo(unlimited_scheduler: Arc<UnlimitedScheduler>) {
+        // Create a policy that should allow 2 failures per task
+        let policy = ThresholdCancelPolicy::with_threshold(2);
+        let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
+
+        // Task 1: Should be able to fail twice and succeed on third attempt
+        // But with global tracking, this affects Task 2's failure budget
+        let handle1 = tracker.spawn(async {
+            let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Task 1 failure"));
+            result
+        });
+        let result1 = handle1.await.expect("Task should complete");
+        assert!(result1.is_err(), "Task 1 should fail");
+
+        // Task 2: Should also be able to fail twice, but global counter is now at 1
+        let handle2 = tracker.spawn(async {
+            let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Task 2 failure"));
+            result
+        });
+        let result2 = handle2.await.expect("Task should complete");
+        assert!(result2.is_err(), "Task 2 should fail");
+
+        // Now the global failure count is 2, so tracker should be cancelled
+        assert!(
+            tracker.cancellation_token().is_cancelled(),
+            "Tracker should be cancelled due to global failure count"
+        );
+
+        println!("Global failure count: {}", policy.failure_count());
+        assert_eq!(
+            policy.failure_count(),
+            2,
+            "Global policy counted 2 failures across different tasks"
+        );
+
+        // This demonstrates the limitation: we can't test per-task retry behavior
+        // because failures from different tasks affect each other's retry budgets
+    }
+
+    /// Test continuation loop with custom action policies
+    ///
+    /// This tests that custom error actions can also provide continuations
+    /// and that the loop behavior works correctly with policy-provided continuations
+    ///
+    /// NOTE: Uses fresh policy/action instances to avoid global state interference.
+    #[rstest]
+    #[case(1, true, "Custom action with 1 retry should succeed")]
+    #[case(3, true, "Custom action with 3 retries should succeed")]
+    #[tokio::test]
+    async fn test_continuation_loop_with_custom_action_policy(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        #[case] max_retries: u32,
+        #[case] should_succeed: bool,
+        #[case] description: &str,
+    ) {
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let retry_count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+
+        // Custom action that provides continuations up to max_retries
+        #[derive(Debug)]
+        struct RetryAction {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+            retry_count: Arc<std::sync::atomic::AtomicU32>,
+            max_retries: u32,
+        }
+
+        #[async_trait]
+        impl OnErrorAction for RetryAction {
+            async fn execute(
+                &self,
+                _error: &anyhow::Error,
+                _task_id: TaskId,
+                _attempt_count: u32,
+                _context: &TaskExecutionContext,
+            ) -> ActionResult {
+                let current_retry = self
+                    .retry_count
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                self.log
+                    .lock()
+                    .await
+                    .push(format!("custom_action_retry_{}", current_retry));
+
+                if current_retry <= self.max_retries {
+                    // Provide a continuation that succeeds if this is the final retry
+                    #[derive(Debug)]
+                    struct RetryContinuation {
+                        log: Arc<tokio::sync::Mutex<Vec<String>>>,
+                        retry_number: u32,
+                        max_retries: u32,
+                    }
+
+                    #[async_trait]
+                    impl Continuation for RetryContinuation {
+                        async fn execute(
+                            &self,
+                            _cancel_token: CancellationToken,
+                        ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>>
+                        {
+                            self.log
+                                .lock()
+                                .await
+                                .push(format!("retry_continuation_{}", self.retry_number));
+
+                            if self.retry_number >= self.max_retries {
+                                // Final retry succeeds
+                                TaskExecutionResult::Success(Box::new(format!(
+                                    "success_after_{}_retries",
+                                    self.retry_number
+                                )))
+                            } else {
+                                // Still need more retries, fail with regular error (not FailedWithContinuation)
+                                // This will trigger the custom action again
+                                TaskExecutionResult::Error(anyhow::anyhow!(
+                                    "Retry {} still failing",
+                                    self.retry_number
+                                ))
+                            }
+                        }
+                    }
+
+                    let continuation = Arc::new(RetryContinuation {
+                        log: self.log.clone(),
+                        retry_number: current_retry,
+                        max_retries: self.max_retries,
+                    });
+
+                    ActionResult::Continue { continuation }
+                } else {
+                    // Exceeded max retries, cancel
+                    ActionResult::Shutdown
+                }
+            }
+        }
+
+        // Custom policy that uses the retry action
+        #[derive(Debug)]
+        struct CustomRetryPolicy {
+            action: Arc<RetryAction>,
+        }
+
+        impl OnErrorPolicy for CustomRetryPolicy {
+            fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
+                Arc::new(CustomRetryPolicy {
+                    action: self.action.clone(),
+                })
+            }
+
+            fn on_error(&self, _error: &anyhow::Error, _task_id: TaskId) -> ErrorResponse {
+                ErrorResponse::Custom(Box::new(RetryAction {
+                    log: self.action.log.clone(),
+                    retry_count: self.action.retry_count.clone(),
+                    max_retries: self.action.max_retries,
+                }))
+            }
+        }
+
+        let action = Arc::new(RetryAction {
+            log: execution_log.clone(),
+            retry_count: retry_count.clone(),
+            max_retries,
+        });
+        let policy = Arc::new(CustomRetryPolicy { action });
+        let tracker = TaskTracker::new(unlimited_scheduler, policy).unwrap();
+
+        // Task that always fails with regular error (not FailedWithContinuation)
+        let log_for_task = execution_log.clone();
+        let handle = tracker.spawn(async move {
+            log_for_task
+                .lock()
+                .await
+                .push("original_task_failed".to_string());
+            let result: Result<String, anyhow::Error> =
+                Err(anyhow::anyhow!("Original task failure"));
+            result
+        });
+
+        // Execute and verify results
+        let result = handle.await.expect("Task should complete");
+
+        if should_succeed {
+            assert!(result.is_ok(), "{}: Task should succeed", description);
+            assert_eq!(
+                tracker.metrics().success(),
+                1,
+                "{}: Should have 1 success",
+                description
+            );
+
+            // Verify the retry sequence
+            let log = execution_log.lock().await;
+            let expected_entries = 1 + (max_retries * 2); // original + (action + continuation) per retry
+            assert_eq!(
+                log.len(),
+                expected_entries as usize,
+                "{}: Should have {} log entries",
+                description,
+                expected_entries
+            );
+
+            assert_eq!(
+                retry_count.load(std::sync::atomic::Ordering::Relaxed),
+                max_retries,
+                "{}: Should have made {} retry attempts",
+                description,
+                max_retries
+            );
+        } else {
+            assert!(result.is_err(), "{}: Task should fail", description);
+            assert!(
+                tracker.cancellation_token().is_cancelled(),
+                "{}: Should be cancelled",
+                description
+            );
+
+            // Should have stopped after max_retries
+            let final_retry_count = retry_count.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                final_retry_count > max_retries,
+                "{}: Should have exceeded max_retries ({}), got {}",
+                description,
+                max_retries,
+                final_retry_count
+            );
+        }
+    }
+
+    /// Test mixed continuation sources (task-driven + policy-driven)
+    ///
+    /// This test verifies that both task-provided continuations and policy-provided
+    /// continuations can work together in the same execution flow
+    #[rstest]
+    #[tokio::test]
+    async fn test_mixed_continuation_sources(
+        unlimited_scheduler: Arc<UnlimitedScheduler>,
+        log_policy: Arc<LogOnlyPolicy>,
+    ) {
+        let execution_log = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let tracker = TaskTracker::new(unlimited_scheduler, log_policy).unwrap();
+
+        // Task that provides a continuation, which then fails with regular error
+        let log_for_task = execution_log.clone();
+        let log_for_continuation = execution_log.clone();
+
+        #[derive(Debug)]
+        struct MixedContinuation {
+            log: Arc<tokio::sync::Mutex<Vec<String>>>,
+        }
+
+        #[async_trait]
+        impl Continuation for MixedContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                self.log
+                    .lock()
+                    .await
+                    .push("task_continuation_executed".to_string());
+                // This continuation fails with a regular error (not FailedWithContinuation)
+                // So it will be handled by the policy (LogOnlyPolicy just continues)
+                TaskExecutionResult::Error(anyhow::anyhow!("Task continuation failed"))
+            }
+        }
+
+        let continuation = Arc::new(MixedContinuation {
+            log: log_for_continuation,
+        });
+
+        let handle = tracker.spawn(async move {
+            log_for_task
+                .lock()
+                .await
+                .push("original_task_executed".to_string());
+
+            // Task provides continuation
+            let error = anyhow::anyhow!("Original task failed");
+            let result: Result<String, anyhow::Error> =
+                Err(FailedWithContinuation::into_anyhow(error, continuation));
+            result
+        });
+
+        // Execute - should fail because continuation fails and LogOnlyPolicy just logs
+        let result = handle.await.expect("Task should complete");
+        assert!(
+            result.is_err(),
+            "Should fail because continuation fails and policy just logs"
+        );
+
+        // Verify execution sequence
+        let log = execution_log.lock().await;
+        assert_eq!(log.len(), 2);
+        assert_eq!(log[0], "original_task_executed");
+        assert_eq!(log[1], "task_continuation_executed");
+
+        // Verify metrics - should show failure from continuation
+        assert_eq!(tracker.metrics().success(), 0);
+        assert_eq!(tracker.metrics().failed(), 1);
+    }
+
+    /// Debug test to understand the threshold policy behavior in retry loop
+    #[rstest]
+    #[tokio::test]
+    async fn debug_threshold_policy_in_retry_loop(unlimited_scheduler: Arc<UnlimitedScheduler>) {
+        let policy = ThresholdCancelPolicy::with_threshold(2);
+        let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
+
+        // Simple continuation that always fails with regular error
+        #[derive(Debug)]
+        struct AlwaysFailContinuation {
+            attempt: Arc<std::sync::atomic::AtomicU32>,
+        }
+
+        #[async_trait]
+        impl Continuation for AlwaysFailContinuation {
+            async fn execute(
+                &self,
+                _cancel_token: CancellationToken,
+            ) -> TaskExecutionResult<Box<dyn std::any::Any + Send + 'static>> {
+                let attempt_num = self
+                    .attempt
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                println!("Continuation attempt {}", attempt_num);
+                TaskExecutionResult::Error(anyhow::anyhow!(
+                    "Continuation attempt {} failed",
+                    attempt_num
+                ))
+            }
+        }
+
+        let attempt_counter = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let continuation = Arc::new(AlwaysFailContinuation {
+            attempt: attempt_counter.clone(),
+        });
+
+        let handle = tracker.spawn(async move {
+            println!("Original task executing");
+            let error = anyhow::anyhow!("Original task failed");
+            let result: Result<String, anyhow::Error> =
+                Err(FailedWithContinuation::into_anyhow(error, continuation));
+            result
+        });
+
+        let result = handle.await.expect("Task should complete");
+        println!("Final result: {:?}", result.is_ok());
+        println!("Policy failure count: {}", policy.failure_count());
+        println!(
+            "Continuation attempts: {}",
+            attempt_counter.load(std::sync::atomic::Ordering::Relaxed)
+        );
+        println!(
+            "Tracker cancelled: {}",
+            tracker.cancellation_token().is_cancelled()
+        );
+        println!(
+            "Metrics: success={}, failed={}",
+            tracker.metrics().success(),
+            tracker.metrics().failed()
+        );
+
+        // This should help us understand what's happening
     }
 }
