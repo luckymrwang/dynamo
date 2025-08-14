@@ -18,7 +18,8 @@ Finish the steps right before [Install dynamo model and dynamo gaie helm chart](
 3. **Apply Dynamo-specific manifests**
 
 The Inference Gateway is configured.
-Deploy DynamoGraph. We provide the example in the deployment.yaml which you can adapt.
+No Deploy DynamoGraph. We provide the example in the deployment.yaml which you can adapt.
+The example demonstrates deploying the vLLM inference backend into the default namespace. Adjust as needed.
 
 ```bash
 cd deploy/inference-gateway/epp-aware

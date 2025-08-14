@@ -33,7 +33,7 @@ spec:
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
-        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-13
+        image: nvcr.io/nvidia/ai-dynamo/vepp-inference-extension-dynamo:v1.0.0
         env:
           - name: USE_STREAMING
             value: "true"
@@ -63,7 +63,7 @@ spec:
           initialDelaySeconds: 5
           periodSeconds: 10
       - name: frontend-router
-        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:main0813
+        image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
         imagePullPolicy: IfNotPresent
         command: ["/bin/sh", "-c"]
         args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
