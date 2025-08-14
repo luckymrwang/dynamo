@@ -342,7 +342,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     (id, 0)
                 } else {
                     // Otherwise, find the best match
-                    self.chooser.find_best_match(&request.token_ids).await?
+                    self.chooser
+                        .find_best_match(&request.context_id, &request.token_ids)
+                        .await?
                 };
 
                 let query_instance_id = request.has_annotation("query_instance_id");
