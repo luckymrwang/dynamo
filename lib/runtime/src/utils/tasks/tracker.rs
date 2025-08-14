@@ -580,6 +580,27 @@ pub enum SchedulingPolicy {
 /// - **Stateless where possible**: TaskTracker manages cancellation tokens and state
 /// - **Composable**: Policies can be combined and nested in hierarchies
 /// - **Focused**: Each policy handles one specific error pattern or strategy
+///
+/// Per-task error handling context
+///
+/// Provides context information and state management for error policies.
+/// The state field allows policies to maintain per-task state across multiple error attempts.
+pub struct OnErrorContext {
+    /// Number of times this task has been attempted (starts at 1)
+    pub attempt_count: u32,
+    /// Unique identifier of the failed task
+    pub task_id: TaskId,
+    /// Full execution context with access to scheduler, metrics, etc.
+    pub execution_context: TaskExecutionContext,
+    /// Optional per-task state managed by the policy (None for stateless policies)
+    pub state: Option<Box<dyn std::any::Any + Send + 'static>>,
+}
+
+/// Error handling policy trait for task failures
+///
+/// Policies define how the TaskTracker responds to task failures.
+/// They can be stateless (like LogOnlyPolicy) or maintain per-task state
+/// (like ThresholdCancelPolicy with per-task failure counters).
 pub trait OnErrorPolicy: Send + Sync + std::fmt::Debug {
     /// Create a child policy for a child tracker
     ///
@@ -587,15 +608,26 @@ pub trait OnErrorPolicy: Send + Sync + std::fmt::Debug {
     /// such as child cancellation tokens or shared circuit breaker state.
     fn create_child(&self) -> Arc<dyn OnErrorPolicy>;
 
+    /// Create per-task context state (None if policy is stateless)
+    ///
+    /// This method is called once per task when the first error occurs.
+    /// Stateless policies should return None to avoid unnecessary heap allocations.
+    /// Stateful policies should return Some(Box::new(initial_state)).
+    ///
+    /// # Returns
+    /// * `None` - Policy doesn't need per-task state (no heap allocation)
+    /// * `Some(state)` - Initial state for this task (heap allocated when needed)
+    fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>>;
+
     /// Handle a task failure and return the desired response
     ///
     /// # Arguments
     /// * `error` - The error that occurred
-    /// * `task_id` - Unique identifier of the failed task
+    /// * `context` - Mutable context with attempt count, task info, and optional state
     ///
     /// # Returns
     /// ErrorResponse indicating how the TaskTracker should handle this failure
-    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse;
+    fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse;
 }
 
 /// Common error handling policies for task failure management
@@ -2482,8 +2514,8 @@ impl TaskTrackerInner {
         }
 
         let mut current_executable = CurrentExecutable::TaskExecutor(initial_executor);
-        let mut attempt_count = 1u32;
         let mut active_guard = ActiveCountGuard::new(inner.metrics.clone());
+        let mut error_context: Option<OnErrorContext> = None;
 
         loop {
             // Acquire execution slot through scheduler with cancellation token
@@ -2554,15 +2586,16 @@ impl TaskTrackerInner {
                             return Err(TaskError::Cancelled);
                         }
                         TaskExecutionResult::Error(error) => {
-                            debug!(
-                                attempt_count,
-                                "Task failed - handling error through policy - {error:?}"
-                            );
+                            debug!("Task failed - handling error through policy - {error:?}");
 
                             // Handle the error through the policy system
-                            let action_result =
-                                Self::handle_task_error(&error, task_id, attempt_count, &inner)
-                                    .await;
+                            let action_result = Self::handle_task_error(
+                                &error,
+                                &mut error_context,
+                                task_id,
+                                &inner,
+                            )
+                            .await;
 
                             match action_result {
                                 ActionResult::Fail => {
@@ -2584,7 +2617,6 @@ impl TaskTrackerInner {
                                     // Update current executable and continue the loop
                                     current_executable =
                                         CurrentExecutable::Continuation(continuation);
-                                    attempt_count += 1;
                                     continue; // Continue the main loop with the new executable
                                 }
                             }
@@ -2611,15 +2643,30 @@ impl TaskTrackerInner {
     /// Handle task errors through the error policy and return the action to take
     async fn handle_task_error(
         error: &anyhow::Error,
+        error_context: &mut Option<OnErrorContext>,
         task_id: TaskId,
-        attempt_count: u32,
         inner: &Arc<TaskTrackerInner>,
     ) -> ActionResult {
+        // Create or update the error context (lazy initialization)
+        let context = error_context.get_or_insert_with(|| OnErrorContext {
+            attempt_count: 0, // Will be incremented below
+            task_id,
+            execution_context: TaskExecutionContext {
+                scheduler: inner.scheduler.clone(),
+                metrics: inner.metrics.clone(),
+            },
+            state: inner.error_policy.create_context(),
+        });
+
+        // Increment attempt count for this error
+        context.attempt_count += 1;
+        let current_attempt = context.attempt_count;
+
         // First, check if this is a FailedWithContinuation (task-driven continuation)
         if let Some(continuation_err) = error.downcast_ref::<FailedWithContinuation>() {
             debug!(
                 task_id = %task_id,
-                attempt_count,
+                attempt_count = current_attempt,
                 "Task provided FailedWithContinuation - {error:?}"
             );
 
@@ -2630,8 +2677,7 @@ impl TaskTrackerInner {
             return ActionResult::Continue { continuation };
         }
 
-        // Not a FailedWithContinuation, proceed with normal policy handling
-        let response = inner.error_policy.on_error(error, task_id);
+        let response = inner.error_policy.on_error(error, context);
 
         match response {
             ErrorResponse::Fail => ActionResult::Fail,
@@ -2639,15 +2685,9 @@ impl TaskTrackerInner {
             ErrorResponse::Custom(action) => {
                 debug!("Task failed - executing custom action - {error:?}");
 
-                // Create execution context for the action
-                let context = TaskExecutionContext {
-                    scheduler: inner.scheduler.clone(),
-                    metrics: inner.metrics.clone(),
-                };
-
                 // Execute the custom action asynchronously
                 let action_result = action
-                    .execute(error, task_id, attempt_count, &context)
+                    .execute(error, task_id, current_attempt, &context.execution_context)
                     .await;
                 debug!(?action_result, "Custom action completed");
 
@@ -2885,8 +2925,12 @@ impl OnErrorPolicy for CancelOnError {
         })
     }
 
-    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, "Task failed - {error:?}");
+    fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+        None // Stateless policy - no heap allocation
+    }
+
+    fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
+        error!(?context.task_id, "Task failed - {error:?}");
 
         if self.error_patterns.is_empty() {
             return ErrorResponse::Shutdown;
@@ -2933,8 +2977,12 @@ impl OnErrorPolicy for LogOnlyPolicy {
         Arc::new(LogOnlyPolicy)
     }
 
-    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, "Task failed - logging only - {error:?}");
+    fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+        None // Stateless policy - no heap allocation
+    }
+
+    fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
+        error!(?context.task_id, "Task failed - logging only - {error:?}");
         ErrorResponse::Fail
     }
 }
@@ -2983,6 +3031,12 @@ impl ThresholdCancelPolicy {
     }
 }
 
+/// Per-task state for ThresholdCancelPolicy
+#[derive(Debug)]
+struct ThresholdState {
+    failure_count: u32,
+}
+
 impl OnErrorPolicy for ThresholdCancelPolicy {
     fn create_child(&self) -> Arc<dyn OnErrorPolicy> {
         // Child gets a child cancel token and inherits the same failure threshold
@@ -2992,25 +3046,43 @@ impl OnErrorPolicy for ThresholdCancelPolicy {
         })
     }
 
-    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, "Task failed - {error:?}");
+    fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+        Some(Box::new(ThresholdState { failure_count: 0 }))
+    }
 
-        let current_failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
+    fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
+        error!(?context.task_id, "Task failed - {error:?}");
 
-        if current_failures >= self.max_failures as u64 {
+        // Increment global counter for backwards compatibility
+        let global_failures = self.failure_count.fetch_add(1, Ordering::Relaxed) + 1;
+
+        // Get per-task state for the actual decision logic
+        let state = context
+            .state
+            .as_mut()
+            .expect("ThresholdCancelPolicy requires state")
+            .downcast_mut::<ThresholdState>()
+            .expect("Context type mismatch");
+
+        state.failure_count += 1;
+        let current_failures = state.failure_count;
+
+        if current_failures >= self.max_failures as u32 {
             warn!(
-                ?task_id,
+                ?context.task_id,
                 current_failures,
+                global_failures,
                 max_failures = self.max_failures,
-                "Failure threshold exceeded, triggering cancellation"
+                "Per-task failure threshold exceeded, triggering cancellation"
             );
             ErrorResponse::Shutdown
         } else {
             debug!(
-                ?task_id,
+                ?context.task_id,
                 current_failures,
+                global_failures,
                 max_failures = self.max_failures,
-                "Task failed, tracking failure count"
+                "Task failed, tracking per-task failure count"
             );
             ErrorResponse::Fail
         }
@@ -3099,13 +3171,17 @@ impl OnErrorPolicy for RateCancelPolicy {
         })
     }
 
-    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
-        error!(?task_id, "Task failed - {error:?}");
+    fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+        None // Stateless policy for now (TODO: add time-window state)
+    }
+
+    fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
+        error!(?context.task_id, "Task failed - {error:?}");
 
         // TODO: Implement time-window failure rate calculation
         // For now, just log the error and continue
         warn!(
-            ?task_id,
+            ?context.task_id,
             max_failure_rate = self.max_failure_rate,
             window_secs = self.window_secs,
             "Rate-based error policy - time window tracking not yet implemented"
@@ -3187,9 +3263,13 @@ impl OnErrorPolicy for TriggerCancellationTokenOnError {
         })
     }
 
-    fn on_error(&self, error: &anyhow::Error, task_id: TaskId) -> ErrorResponse {
+    fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+        None // Stateless policy - no heap allocation
+    }
+
+    fn on_error(&self, error: &anyhow::Error, context: &mut OnErrorContext) -> ErrorResponse {
         error!(
-            ?task_id,
+            ?context.task_id,
             "Task failed - triggering custom cancellation token - {error:?}"
         );
 
@@ -3692,7 +3772,7 @@ mod tests {
                             rx.await.ok();
                         }
                     } => CancellableTaskResult::Ok("should not complete"),
-                    _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
+                _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
                 }
             }
         });
@@ -3743,10 +3823,10 @@ mod tests {
                             rx.await.ok();
                         }
                     } => CancellableTaskResult::Ok("completed normally"),
-                    _ = cancel_token.cancelled() => {
-                        println!("Task detected cancellation and is returning Cancelled");
-                        CancellableTaskResult::Cancelled
-                    },
+                _ = cancel_token.cancelled() => {
+                    println!("Task detected cancellation and is returning Cancelled");
+                    CancellableTaskResult::Cancelled
+                },
                 }
             }
         });
@@ -4369,22 +4449,26 @@ mod tests {
     #[rstest]
     #[tokio::test]
     async fn test_threshold_cancel_policy(semaphore_scheduler: Arc<SemaphoreScheduler>) {
-        // Test that ThresholdCancelPolicy cancels after failure threshold
-        let error_policy = ThresholdCancelPolicy::with_threshold(2); // Cancel after 2 failures
+        // Test that ThresholdCancelPolicy now uses per-task failure counting
+        let error_policy = ThresholdCancelPolicy::with_threshold(2); // Cancel after 2 failures per task
         let tracker = TaskTracker::new(semaphore_scheduler, error_policy.clone()).unwrap();
         let cancel_token = tracker.cancellation_token().child_token();
 
-        // First failure - should not cancel
+        // With per-task context, individual task failures don't accumulate
+        // Each task starts with failure_count = 0, so single failures won't trigger cancellation
         let _handle1 = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("First failure")) });
         tokio::task::yield_now().await;
         assert!(!cancel_token.is_cancelled());
-        assert_eq!(error_policy.failure_count(), 1);
+        assert_eq!(error_policy.failure_count(), 1); // Global counter still increments
 
-        // Second failure - should trigger cancellation
+        // Second failure from different task - still won't trigger cancellation
         let _handle2 = tracker.spawn(async { Err::<(), _>(anyhow::anyhow!("Second failure")) });
         tokio::task::yield_now().await;
-        assert!(cancel_token.is_cancelled());
-        assert_eq!(error_policy.failure_count(), 2);
+        assert!(!cancel_token.is_cancelled()); // Per-task context prevents cancellation
+        assert_eq!(error_policy.failure_count(), 2); // Global counter increments
+
+        // For cancellation to occur, a single task would need to fail multiple times
+        // through continuations (which would require a more complex test setup)
     }
 
     #[tokio::test]
@@ -5331,15 +5415,15 @@ mod tests {
         }
     }
 
-    /// Simple test to understand ThresholdCancelPolicy behavior
+    /// Simple test to understand ThresholdCancelPolicy behavior with per-task context
     #[rstest]
     #[tokio::test]
     async fn test_simple_threshold_policy_behavior(unlimited_scheduler: Arc<UnlimitedScheduler>) {
-        // Test with max_failures=2 - should allow 2 failures before canceling
+        // Test with max_failures=2 - now uses per-task failure counting
         let policy = ThresholdCancelPolicy::with_threshold(2);
         let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
 
-        // Task 1: Should fail and continue (failure count = 1)
+        // Task 1: Should fail but not trigger cancellation (per-task failure count = 1)
         let handle1 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("First failure"));
             result
@@ -5351,7 +5435,7 @@ mod tests {
             "Should not be cancelled after 1 failure"
         );
 
-        // Task 2: Should fail and trigger cancellation (failure count = 2)
+        // Task 2: Should fail but not trigger cancellation (different task, per-task failure count = 1)
         let handle2 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Second failure"));
             result
@@ -5359,22 +5443,21 @@ mod tests {
         let result2 = handle2.await.expect("Task should complete");
         assert!(result2.is_err(), "Second task should fail");
         assert!(
-            tracker.cancellation_token().is_cancelled(),
-            "Should be cancelled after 2 failures"
+            !tracker.cancellation_token().is_cancelled(),
+            "Should NOT be cancelled - per-task context prevents global accumulation"
         );
 
-        println!("Policy failure count: {}", policy.failure_count());
+        println!("Policy global failure count: {}", policy.failure_count());
         assert_eq!(
             policy.failure_count(),
             2,
-            "Policy should have counted 2 failures"
+            "Policy should have counted 2 failures globally (for backwards compatibility)"
         );
     }
 
-    /// Test demonstrating the need for per-task error context
+    /// Test demonstrating that per-task error context solves the global failure tracking problem
     ///
-    /// This test shows why we need OnErrorContext - the current global failure tracking
-    /// doesn't work well for testing individual task retry behavior.
+    /// This test shows that with OnErrorContext, each task has independent failure tracking.
     #[rstest]
     #[tokio::test]
     async fn test_per_task_context_limitation_demo(unlimited_scheduler: Arc<UnlimitedScheduler>) {
@@ -5382,8 +5465,7 @@ mod tests {
         let policy = ThresholdCancelPolicy::with_threshold(2);
         let tracker = TaskTracker::new(unlimited_scheduler, policy.clone()).unwrap();
 
-        // Task 1: Should be able to fail twice and succeed on third attempt
-        // But with global tracking, this affects Task 2's failure budget
+        // Task 1: Fails once (per-task failure count = 1, below threshold)
         let handle1 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Task 1 failure"));
             result
@@ -5391,7 +5473,8 @@ mod tests {
         let result1 = handle1.await.expect("Task should complete");
         assert!(result1.is_err(), "Task 1 should fail");
 
-        // Task 2: Should also be able to fail twice, but global counter is now at 1
+        // Task 2: Also fails once (per-task failure count = 1, below threshold)
+        // With per-task context, this doesn't interfere with Task 1's failure budget
         let handle2 = tracker.spawn(async {
             let result: Result<String, anyhow::Error> = Err(anyhow::anyhow!("Task 2 failure"));
             result
@@ -5399,10 +5482,11 @@ mod tests {
         let result2 = handle2.await.expect("Task should complete");
         assert!(result2.is_err(), "Task 2 should fail");
 
-        // Now the global failure count is 2, so tracker should be cancelled
+        // With per-task context, tracker should NOT be cancelled
+        // Each task failed only once, which is below the threshold of 2
         assert!(
-            tracker.cancellation_token().is_cancelled(),
-            "Tracker should be cancelled due to global failure count"
+            !tracker.cancellation_token().is_cancelled(),
+            "Tracker should NOT be cancelled - per-task context prevents premature cancellation"
         );
 
         println!("Global failure count: {}", policy.failure_count());
@@ -5526,7 +5610,15 @@ mod tests {
                 })
             }
 
-            fn on_error(&self, _error: &anyhow::Error, _task_id: TaskId) -> ErrorResponse {
+            fn create_context(&self) -> Option<Box<dyn std::any::Any + Send + 'static>> {
+                None // Stateless policy - no heap allocation
+            }
+
+            fn on_error(
+                &self,
+                _error: &anyhow::Error,
+                _context: &mut OnErrorContext,
+            ) -> ErrorResponse {
                 ErrorResponse::Custom(Box::new(RetryAction {
                     log: self.action.log.clone(),
                     retry_count: self.action.retry_count.clone(),
