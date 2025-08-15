@@ -567,14 +567,19 @@ class DynamoChecker:
 
         # PyTorch info
         torch_version: Optional[str] = None
+        torch_cuda_available: Optional[bool] = None
         try:
             import importlib
 
             torch = importlib.import_module("torch")  # type: ignore
             try:
                 torch_version = getattr(torch, "__version__", None)  # type: ignore[attr-defined]
+                # Check CUDA availability through PyTorch
+                if hasattr(torch, "cuda"):
+                    torch_cuda_available = torch.cuda.is_available()  # type: ignore[attr-defined]
             except Exception:
                 torch_version = None
+                torch_cuda_available = None
         except Exception:
             # torch not installed
             pass
@@ -756,7 +761,14 @@ class DynamoChecker:
         print(f"{'├─' if more_after_python else '└─'} {python_line}")
         # Torch version as a child under Python
         if torch_version:
-            print("   └─ Torch: " + str(torch_version))
+            cuda_status = ""
+            if torch_cuda_available is not None:
+                cuda_status = (
+                    " (✅torch.cuda.is_available())"
+                    if torch_cuda_available
+                    else " (❌torch.cuda.is_available())"
+                )
+            print("   └─ Torch: " + str(torch_version) + cuda_status)
         else:
             # Show as a child under Python
             print("   └─ ❌ Torch: not installed")
