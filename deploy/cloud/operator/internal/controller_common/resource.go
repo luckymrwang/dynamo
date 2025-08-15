@@ -273,12 +273,8 @@ func generateSpecDiff(oldResource, newResource client.Object) (string, error) {
 		return "", fmt.Errorf("failed to get new spec: %w", err)
 	}
 
-	// Convert specs to sorted JSON for consistent comparison
-	oldSorted := SortKeys(oldSpec)
-	newSorted := SortKeys(newSpec)
-
 	// Generate diff using cmp
-	diff := cmp.Diff(oldSorted, newSorted)
+	diff := cmp.Diff(oldSpec, newSpec)
 	if diff == "" {
 		return "", nil
 	}
