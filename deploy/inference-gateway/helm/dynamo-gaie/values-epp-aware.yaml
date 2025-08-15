@@ -12,17 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v1
-kind: Service
-metadata:
-  name: qwen-epp
-spec:
-  selector:
-    app: qwen-epp
-  ports:
-    - name: extproc
-      protocol: TCP
-      port: 9002
-      targetPort: 9002
-      appProtocol: grpc
-  type: ClusterIP
+
+eppAware:
+  enabled: true
+  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:1.0.0
+
+imagePullSecrets:
+  - docker-imagepullsecret
+
+epp:
+  extraEnv:
+    - name: USE_STREAMING
+      value: "true"

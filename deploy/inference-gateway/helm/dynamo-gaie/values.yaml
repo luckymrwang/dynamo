@@ -20,34 +20,59 @@
 # This is the Dynamo namespace where the dynamo model is deployed
 dynamoNamespace: "vllm-agg"
 
-# This is the port on which the model is exposed
 model:
-  # This is the model name that will be used to route traffic to the dynamo model
-  # for example, if the model name is Qwen/Qwen3-0.6B, then the modelShortName should be qwen
   identifier: "Qwen/Qwen3-0.6B"
-  # This is the short name of the model that will be used to generate the resource names
   shortName: "qwen"
-  # Criticality level for the inference model
   criticality: "Critical"
 
-# InferencePool configuration
 inferencePool:
-  # Target port number for the inference pool
   port: 8000
 
-# HTTPRoute configuration
 httpRoute:
-  # Enable the HTTPRoute
   enabled: true
-  # Gateway parent reference configuration
   gatewayName: "inference-gateway"
-  # Path matching configuration
   path:
     prefix: "/"
-  # Timeout configuration
   timeout:
     request: "300s"
 
 extension:
-  # the GAIE extension
+  # default (non-epp-aware) EPP image for the GAIE extension
   image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0
+
+# NEW: generic knobs you may want in both modes
+imagePullSecrets: []     # e.g. ["docker-imagepullsecret"]
+epp:
+  imagePullPolicy: IfNotPresent
+  # Add env in name/value pairs (works for both modes)
+  extraEnv: []           # e.g. [{name: USE_STREAMING, value: "true"}]
+  # If you ever want to completely override args, supply a list here.
+  # When empty, chart will render sane defaults
+  argsOverride: []
+
+# NEW: epp-aware mode toggle + specific settings
+eppAware:
+  enabled: false
+  # Optional: override EPP image when epp-aware=true
+  eppImage: docker.io/lambda108/epp-inference-extension-dynamo:1.0.0
+
+  # Sidecar (frontend-router)
+  sidecar:
+    name: frontend-router
+    image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.1
+    imagePullPolicy: IfNotPresent
+    command: ["/bin/sh", "-c"]
+    args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
+    env:
+      - name: DYNAMO_NAMESPACE
+        valueFromDynamoNamespace: true   # special flag; chart will render .Values.dynamoNamespace
+      - name: ETCD_ENDPOINTS
+        value: "http://dynamo-platform-etcd:2379"
+      - name: NATS_SERVER
+        value: "nats://dynamo-platform-nats:4222"
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+    ports:
+      - containerPort: 8000
