@@ -43,7 +43,7 @@ spec:
           memory: "10Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.2
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -84,7 +84,7 @@ spec:
       extraPodSpec:
         serviceAccountName: planner-serviceaccount
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.2
           workingDir: /workspace/components/planner/src/dynamo/planner
           args:
             - python
@@ -129,7 +129,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.2
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -183,7 +183,7 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 120
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.2
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -237,7 +237,7 @@ spec:
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 120
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-301.2
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
