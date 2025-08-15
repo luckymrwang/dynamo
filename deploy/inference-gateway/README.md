@@ -3,7 +3,7 @@
 This guide demonstrates two setups.
 The EPP-unaware setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
 The EPP-aware setup first uses Dynamo Router to pick the worker instance id for serving the model. Then traffic gets directed straight to the selected worker.
-Currently, these setup are only supported with the gateway based Inference Gateway.
+Currently, these setups are only supported with the kGateway based Inference Gateway.
 
 ## Table of Contents
 
