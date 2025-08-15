@@ -53,13 +53,13 @@ kubectl port-forward service/vllm-disagg-planner-frontend 8000:8000
 Generate different types of load to stress the system:
 
 ```bash
-# Sustained load
+# Sustained load -- simulating continuous concurrent requests from multiple users
 python sla_planner_load_test.py --pattern sustained --concurrent-users 10 --duration 300
 
-# Burst load pattern
+# Burst load pattern -- period bursts of requests, testing scaling responsiveness
 python sla_planner_load_test.py --pattern burst --burst-requests 15 --burst-interval 30 --duration 300
 
-# Ramp-up pattern
+# Ramp-up pattern -- gradually increasing load over time
 python sla_planner_load_test.py --pattern ramp --concurrent-users 15 --ramp-duration 60 --duration 300
 ```
 
