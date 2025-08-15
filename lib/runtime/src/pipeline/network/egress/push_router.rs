@@ -7,7 +7,8 @@ use crate::{
     component::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
     pipeline::{
-        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+        error::{PipelineError, PipelineErrorExt},
+        AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
     },
     protocols::maybe_error::MaybeError,
     traits::DistributedRuntimeProvider,
@@ -210,7 +211,10 @@ where
             // Check if we actually have any instances at all
             let all_instances = self.client.instance_ids();
             if !all_instances.is_empty() {
-                return Err(anyhow::anyhow!("All workers are busy, please retry later"));
+                return Err(PipelineError::ServiceOverloaded(
+                    "All workers are busy, please retry later".to_string(),
+                )
+                .into());
             }
         }
 
@@ -356,7 +360,7 @@ where
                             let busy_instances: Vec<i64> = states
                                 .iter()
                                 .filter_map(|(&id, state)| {
-                                    state.is_busy(BUSY_THRESHOLD).then(|| id)
+                                    state.is_busy(BUSY_THRESHOLD).then_some(id)
                                 })
                                 .collect();
                             drop(states);
