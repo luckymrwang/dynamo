@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/utils/ptr"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
@@ -871,6 +872,7 @@ func GenerateGrovePodGangSet(
 	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
 		PublishNotReadyAddresses: true,
 	}
+	gangSet.Spec.Template.StartupType = ptr.To(grovev1alpha1.CliqueStartupTypeAnyOrder)
 	if controllerConfig.Grove.TerminationDelay > 0 {
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
@@ -911,9 +913,10 @@ func GenerateGrovePodGangSet(
 			clique := &grovev1alpha1.PodCliqueTemplateSpec{
 				Name: strings.ToLower(r.Name),
 				Spec: grovev1alpha1.PodCliqueSpec{
-					RoleName: strings.ToLower(r.Name),
-					Replicas: r.Replicas,
-					PodSpec:  *podSpec,
+					RoleName:     strings.ToLower(r.Name),
+					Replicas:     r.Replicas,
+					MinAvailable: ptr.To(int32(1)),
+					PodSpec:      *podSpec,
 				},
 			}
 			labels, err := generateLabels(component, dynamoDeployment, r.Name)
@@ -935,9 +938,10 @@ func GenerateGrovePodGangSet(
 
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:        strings.ToLower(serviceName),
-				CliqueNames: cliqueNames,
-				Replicas:    component.Replicas,
+				Name:         strings.ToLower(serviceName),
+				CliqueNames:  cliqueNames,
+				Replicas:     component.Replicas,
+				MinAvailable: ptr.To(int32(1)),
 			})
 		}
 	}

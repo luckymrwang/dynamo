@@ -798,11 +798,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 								Containers: []corev1.Container{
 									{
-										Name:    "main",
-										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
-										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
+										Name:          "main",
+										Image:         "test-image:latest",
+										Command:       []string{"sh", "-c"},
+										RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+										Args:          []string{"ray start --head --port=6379 && some dynamo command"},
+										Env:           []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,
@@ -897,11 +898,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 								Containers: []corev1.Container{
 									{
-										Name:    "main",
-										Image:   "test-image:latest",
-										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
-										Env:     []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
+										Name:          "main",
+										Image:         "test-image:latest",
+										Command:       []string{"sh", "-c"},
+										RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+										Args:          []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"},
+										Env:           []corev1.EnvVar{{Name: "TEST_ENV_FROM_DYNAMO_COMPONENT_DEPLOYMENT_SPEC", Value: "test_value_from_dynamo_component_deployment_spec"}, {Name: "TEST_ENV_FROM_EXTRA_POD_SPEC", Value: "test_value_from_extra_pod_spec"}},
 										Ports: []corev1.ContainerPort{
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoSystemPortName, ContainerPort: commonconsts.DynamoSystemPort,

@@ -8,6 +8,7 @@ package dynamo
 import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/utils/ptr"
 )
 
 // ComponentDefaults interface defines how defaults should be provided
@@ -50,7 +51,13 @@ func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (core
 }
 
 func (b *BaseComponentDefaults) GetBasePodSpec(context ComponentContext) (corev1.PodSpec, error) {
-	return corev1.PodSpec{}, nil
+	return b.getCommonPodSpec(), nil
+}
+
+func (b *BaseComponentDefaults) getCommonPodSpec() corev1.PodSpec {
+	return corev1.PodSpec{
+		TerminationGracePeriodSeconds: &[]int64{60}[0],
+	}
 }
 
 func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) corev1.Container {
@@ -60,6 +67,7 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 			"/bin/sh",
 			"-c",
 		},
+		RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 	}
 	container.Env = []corev1.EnvVar{
 		{
