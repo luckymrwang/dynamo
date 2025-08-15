@@ -1246,6 +1246,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												Name: "frontend-secret",
 											},
 										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1259,7 +1260,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"--frontend-env-1",
 													"1",
 												},
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -1380,6 +1380,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1393,7 +1394,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"--planner-env-1",
 													"1",
 												},
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 												EnvFrom: []corev1.EnvFromSource{
 													{
 														SecretRef: &corev1.SecretEnvSource{
@@ -1721,6 +1721,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									Replicas:     1,
 									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										Volumes: []corev1.Volume{
 											{
@@ -1735,9 +1736,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "worker-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",
@@ -1871,6 +1871,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									MinAvailable: ptr.To(int32(1)),
 									// StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
 										Volumes: []corev1.Volume{
 											{
@@ -1885,9 +1886,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "worker-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",
@@ -1996,11 +1996,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "frontend-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",
@@ -2111,6 +2111,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									MinAvailable: ptr.To(int32(1)),
 									PodSpec: corev1.PodSpec{
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Volumes: []corev1.Volume{
 											{
 												Name: "planner-pvc",
@@ -2132,9 +2133,8 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 										},
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "planner-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",
@@ -2507,11 +2507,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(60)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "worker-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",
@@ -2645,11 +2645,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 											},
 										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "worker-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "worker-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",
@@ -2758,11 +2758,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 											},
 										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+										RestartPolicy:                 corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "frontend-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "frontend-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",
@@ -2892,11 +2892,11 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 											},
 										},
+										RestartPolicy: corev1.RestartPolicyAlways,
 										Containers: []corev1.Container{
 											{
-												Name:          "main",
-												Image:         "planner-image",
-												RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
+												Name:  "main",
+												Image: "planner-image",
 												Command: []string{
 													"/bin/sh",
 													"-c",

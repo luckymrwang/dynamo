@@ -11,7 +11,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	"k8s.io/utils/ptr"
 )
 
 func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
@@ -48,7 +47,6 @@ func TestPlannerDefaults_GetBaseContainer(t *testing.T) {
 					"/bin/sh",
 					"-c",
 				},
-				RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU:    resource.MustParse("2"),

@@ -56,7 +56,8 @@ func (b *BaseComponentDefaults) GetBasePodSpec(context ComponentContext) (corev1
 
 func (b *BaseComponentDefaults) getCommonPodSpec() corev1.PodSpec {
 	return corev1.PodSpec{
-		TerminationGracePeriodSeconds: &[]int64{60}[0],
+		TerminationGracePeriodSeconds: ptr.To(int64(60)),
+		RestartPolicy:                 corev1.RestartPolicyAlways,
 	}
 }
 
@@ -67,7 +68,6 @@ func (b *BaseComponentDefaults) getCommonContainer(context ComponentContext) cor
 			"/bin/sh",
 			"-c",
 		},
-		RestartPolicy: ptr.To(corev1.ContainerRestartPolicyAlways),
 	}
 	container.Env = []corev1.EnvVar{
 		{
