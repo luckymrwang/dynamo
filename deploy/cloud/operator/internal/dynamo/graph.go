@@ -810,7 +810,8 @@ func GenerateBasePodSpec(
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
-	return controller_common.CanonicalizePodSpec(&podSpec), nil
+	// return controller_common.CanonicalizePodSpec(&podSpec), nil
+	return &podSpec, nil
 }
 
 func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) {
