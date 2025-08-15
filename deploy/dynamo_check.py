@@ -19,7 +19,6 @@ Outputs:
 System info:
 ├─ OS: Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64); Memory: 30.9/125.5 GiB; Cores: 32
 ├─ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation (driver 570.133.07, CUDA 12.8); Power: 28.20/300.00 W; Memory: 2/49140 MiB
-├─ CUDA: driver 570.133.07, CUDA 12.8
 ├─ Cargo (/usr/local/cargo/bin/cargo, cargo 1.87.0 (99624be96 2025-05-06))
    ├─ Cargo home directory: $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
    └─ Cargo target directory: $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
@@ -49,15 +48,6 @@ System info:
       ├─ ✅ dynamo.vllm         $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
       ├─ ✅ dynamo.sglang       $HOME/dynamo/components/backends/sglang/src/dynamo/sglang/__init__.py
       └─ ✅ dynamo.llama_cpp    $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
-
-Missing framework components. You can choose one of the following options:
-1. For development mode (fast build, editable installation):
-   CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" cargo build --locked --features dynamo-llm/block-manager --workspace
-   cd lib/bindings/python && maturin develop --uv --features block-manager
-2. For production mode (slower build, optimized wheels):
-   cargo build --release --locked --features dynamo-llm/block-manager --workspace
-   cd lib/bindings/python && maturin build --release --features block-manager --out ../../target/wheels
-   cd ../../ && pip wheel --no-deps --wheel-dir target/wheels .
 """
 
 import argparse
@@ -506,8 +496,10 @@ class DynamoChecker:
 
         Tree structure:
         System info:
-        ├─ Linux: ...
-        ├─ GPU: ...
+        ├─ OS: ...
+        ├─ NVIDIA GPU: ...
+        ├─ Cargo: ...
+        ├─ Maturin: ...
         └─ Python: ...
         """
         # OS info
@@ -635,7 +627,7 @@ class DynamoChecker:
             system_output.append(f"├─ {gpu_lines[0]}")
         else:
             for i, gpu_line in enumerate(gpu_lines):
-                # Last GPU gets ├─, others get ├─ too
+                # All GPUs use ├─ (more system info follows)
                 system_output.append(f"├─ {gpu_line}")
 
         print("\n".join(system_output))
