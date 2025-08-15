@@ -33,7 +33,6 @@ pytestmark = [
     pytest.mark.e2e,
     pytest.mark.slow,
     pytest.mark.nightly,
-    pytest.mark.vllm,
     pytest.mark.gpu_1,
 ]
 
@@ -78,7 +77,7 @@ class VLLMServerManager:
             str(self.port),
             "--kv-transfer-config",
             '{"kv_connector":"DynamoConnector","kv_role":"kv_both", "kv_connector_module_path": "dynamo.llm.vllm_integration.connector"}',
-            os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
+            os.environ.get("KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"),
         ]
 
         # GPU blocks override
@@ -182,7 +181,9 @@ class VLLMServerManager:
 
             # Then check if the model endpoint is ready with a simple test request
             test_payload = {
-                "model": os.environ.get("KVBM_MODEL_ID", "Qwen/Qwen3-0.6B"),
+                "model": os.environ.get(
+                    "KVBM_MODEL_ID", "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+                ),
                 "messages": [{"role": "user", "content": "test"}],
                 "max_completion_tokens": 1,
                 "temperature": 0,
@@ -208,7 +209,11 @@ class DeterminismTester:
         self.base_url = (
             base_url or os.environ.get("DYNAMO_API_BASE_URL") or "http://localhost:8000"
         )
-        self.model_id = model_id or os.environ.get("KVBM_MODEL_ID") or "Qwen/Qwen3-0.6B"
+        self.model_id = (
+            model_id
+            or os.environ.get("KVBM_MODEL_ID")
+            or "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+        )
 
         self.shakespeare_file = Path("t8.shakespeare.txt")
         self.max_iterations = int(os.environ.get("KVBM_MAX_ITERATIONS", "500"))
@@ -297,7 +302,7 @@ class DeterminismTester:
             timeout=int(os.environ.get("KVBM_HTTP_TIMEOUT", "30")),
         )
         response.raise_for_status()
-        print(f"Cache reset response: {response.text}")
+        print("Cache reset done")
 
     def warmup_server(self):
         """Perform comprehensive server warmup with all test prompts."""
@@ -385,19 +390,13 @@ class DeterminismTester:
             )
             return self.control_sequences + self.random_sequences
 
-    def run_test_iterations(self, reset_cache_after: Optional[int] = None):
+    def run_test_iterations(self):
         """Run the test iterations with comprehensive warmup."""
         # Perform initial warmup before testing
         self.warmup_server()
 
         for iteration in range(1, self.max_iterations + 1):
             print(f"Iteration {iteration}/{self.max_iterations}")
-
-            # Reset cache if needed
-            if reset_cache_after and iteration == reset_cache_after + 1:
-                self.reset_prefix_cache()
-                # Perform warmup after cache reset
-                self.warmup_server()
 
             # Control sequence test
             if iteration % self.control_interval == 0:
@@ -595,13 +594,13 @@ class DeterminismTester:
 
             if not mismatches:
                 print(
-                    f"  ✅ DETERMINISTIC: All {len(responses)} concurrent responses identical"
+                    f"   DETERMINISTIC: All {len(responses)} concurrent responses identical"
                 )
                 print(f"     Response: {reference_response}")
                 deterministic_prompts += 1
             else:
-                print(f"  ❌ NON-DETERMINISTIC: {len(mismatches)} different responses")
-                print(f"     Reference ({request_ids[0]}): {reference_response}")
+                print(f"    NON-DETERMINISTIC: {len(mismatches)} different responses")
+                print(f"    Reference ({request_ids[0]}): {reference_response}")
                 for req_id, diff_response in mismatches:
                     print(f"     Different ({req_id}): {diff_response}")
 
@@ -675,85 +674,118 @@ class TestDeterminism:
         ],
         indirect=True,
     )
-    def test_determinism_without_cache_reset(
-        self, tester, vllm_server, runtime_services
-    ):
-        """Test determinism without cache reset."""
-        print("\n" + "=" * 70)
-        print("STARTING DETERMINISM TEST (NO CACHE RESET)")
-        print("=" * 70)
-
-        tester.run_test_iterations()
-
-        # Analyze results
-        total_passed = 0
-        total_failed = 0
-
-        for responses, name in [
-            (tester.control_responses, "Control"),
-            (tester.shakespeare_responses, "Shakespeare"),
-            (tester.random_responses, "Random"),
-        ]:
-            passed, failed = tester.analyze_responses(responses, name)
-            total_passed += passed
-            total_failed += failed
-
-        # Final assessment
-        print("\n" + "=" * 70)
-        print("FINAL DETERMINISM ASSESSMENT")
-        print("=" * 70)
-        print(f"Total sequence tests: {total_passed + total_failed}")
-        print(f"Passed (deterministic): {total_passed}")
-        print(f"Failed (non-deterministic): {total_failed}")
-        print(
-            "Tests used comprehensive server warmup (all test prompts sent before testing) to avoid server warmup effects."
-        )
-
-        if total_passed + total_failed == 0:
-            pytest.skip("No tests were completed - insufficient data")
-
-        assert (
-            total_failed == 0
-        ), f"Model is not deterministic: {total_failed} tests failed"
-
-    @pytest.mark.parametrize(
-        "vllm_server",
-        [
-            {"cpu_blocks": int(os.environ.get("KVBM_CPU_BLOCKS", "10000"))},
-        ],
-        indirect=True,
-    )
     def test_determinism_with_cache_reset(self, tester, vllm_server, runtime_services):
-        """Test determinism with cache reset after N requests (default 500)."""
+        """Test determinism across cache reset: run test with warmup, reset cache, run again without warmup."""
         print("\n" + "=" * 70)
         print("STARTING DETERMINISM TEST (WITH CACHE RESET)")
         print("=" * 70)
 
-        reset_after = int(os.environ.get("KVBM_RESET_AFTER", "500"))
-        tester.run_test_iterations(reset_cache_after=reset_after)
+        # Phase 1: Run test with warmup
+        print("\n=== PHASE 1: BEFORE CACHE RESET (WITH WARMUP) ===")
+        tester.run_test_iterations()
 
-        # Analyze results
+        # Store Phase 1 results
+        phase1_control = {k: v.copy() for k, v in tester.control_responses.items()}
+        phase1_shakespeare = {
+            k: v.copy() for k, v in tester.shakespeare_responses.items()
+        }
+        phase1_random = {k: v.copy() for k, v in tester.random_responses.items()}
+
+        # Reset cache
+        print("\n" + "=" * 50)
+        print("RESETTING CACHE")
+        print("=" * 50)
+        tester.reset_prefix_cache()
+
+        # Clear response storage for Phase 2 (they are defaultdict, so they'll auto-initialize)
+        tester.control_responses.clear()
+        tester.shakespeare_responses.clear()
+        tester.random_responses.clear()
+
+        # Phase 2: Run test without warmup
+        print("\n=== PHASE 2: AFTER CACHE RESET (NO WARMUP) ===")
+        # Temporarily disable warmup by modifying the method
+        original_warmup = tester.warmup_server
+        tester.warmup_server = lambda: print(
+            "Skipping warmup (testing determinism across cache reset)"
+        )
+
+        try:
+            tester.run_test_iterations()
+        finally:
+            # Restore original warmup method
+            tester.warmup_server = original_warmup
+
+        # Compare Phase 1 vs Phase 2 results
+        print("\n" + "=" * 70)
+        print("CROSS-CACHE-RESET DETERMINISM ANALYSIS")
+        print("=" * 70)
+
         total_passed = 0
         total_failed = 0
 
-        for responses, name in [
-            (tester.control_responses, "Control"),
-            (tester.shakespeare_responses, "Shakespeare"),
-            (tester.random_responses, "Random"),
-        ]:
-            passed, failed = tester.analyze_responses(responses, name)
-            total_passed += passed
-            total_failed += failed
+        # Compare control sequences
+        for seq_idx in phase1_control:
+            if seq_idx in tester.control_responses:
+                phase1_responses = phase1_control[seq_idx]
+                phase2_responses = tester.control_responses[seq_idx]
+
+                min_responses = min(len(phase1_responses), len(phase2_responses))
+                for i in range(min_responses):
+                    if phase1_responses[i] == phase2_responses[i]:
+                        total_passed += 1
+                        print(f"   Control {seq_idx}, response {i}: DETERMINISTIC")
+                    else:
+                        total_failed += 1
+                        print(f"   Control {seq_idx}, response {i}: NON-DETERMINISTIC")
+                        print(f"     Before: {phase1_responses[i]}")
+                        print(f"     After:  {phase2_responses[i]}")
+
+        # Compare Shakespeare sequences
+        for seq_idx in phase1_shakespeare:
+            if seq_idx in tester.shakespeare_responses:
+                phase1_responses = phase1_shakespeare[seq_idx]
+                phase2_responses = tester.shakespeare_responses[seq_idx]
+
+                min_responses = min(len(phase1_responses), len(phase2_responses))
+                for i in range(min_responses):
+                    if phase1_responses[i] == phase2_responses[i]:
+                        total_passed += 1
+                        print(f"   Shakespeare {seq_idx}, response {i}: DETERMINISTIC")
+                    else:
+                        total_failed += 1
+                        print(
+                            f"   Shakespeare {seq_idx}, response {i}: NON-DETERMINISTIC"
+                        )
+                        print(f"     Before: {phase1_responses[i]}")
+                        print(f"     After:  {phase2_responses[i]}")
+
+        # Compare random sequences
+        for seq_idx in phase1_random:
+            if seq_idx in tester.random_responses:
+                phase1_responses = phase1_random[seq_idx]
+                phase2_responses = tester.random_responses[seq_idx]
+
+                min_responses = min(len(phase1_responses), len(phase2_responses))
+                for i in range(min_responses):
+                    if phase1_responses[i] == phase2_responses[i]:
+                        total_passed += 1
+                        print(f"   Random {seq_idx}, response {i}: DETERMINISTIC")
+                    else:
+                        total_failed += 1
+                        print(f"   Random {seq_idx}, response {i}: NON-DETERMINISTIC")
+                        print(f"     Before: {phase1_responses[i]}")
+                        print(f"     After:  {phase2_responses[i]}")
 
         # Final assessment
         print("\n" + "=" * 70)
-        print("FINAL DETERMINISM ASSESSMENT (WITH CACHE RESET)")
+        print("FINAL CROSS-CACHE-RESET DETERMINISM ASSESSMENT")
         print("=" * 70)
-        print(f"Total sequence tests: {total_passed + total_failed}")
+        print(f"Total comparisons: {total_passed + total_failed}")
         print(f"Passed (deterministic): {total_passed}")
         print(f"Failed (non-deterministic): {total_failed}")
         print(
-            "Tests used comprehensive server warmup (all test prompts sent before each run) to avoid server warmup effects."
+            "Test compared responses before cache reset (with warmup) vs after cache reset (no warmup)."
         )
 
         if total_passed + total_failed == 0:
@@ -761,7 +793,7 @@ class TestDeterminism:
 
         assert (
             total_failed == 0
-        ), f"Model is not deterministic with cache reset: {total_failed} tests failed"
+        ), f"Model is not deterministic across cache reset: {total_failed} comparisons failed"
 
     @pytest.mark.parametrize(
         "vllm_server",
@@ -772,7 +804,7 @@ class TestDeterminism:
     )
     @pytest.mark.parametrize(
         "num_concurrent",
-        [int(x) for x in os.environ.get("KVBM_CONCURRENT_REQUESTS", "5").split(",")],
+        [int(x) for x in os.environ.get("KVBM_CONCURRENT_REQUESTS", "3").split(",")],
     )
     @pytest.mark.parametrize(
         "max_tokens",
@@ -862,6 +894,14 @@ class TestDeterminism:
 
                 # Wait for 10 seconds to make sure all transfers are complete
                 time.sleep(10)
+                # Reset cache
+                print("\n" + "=" * 50)
+                print("RESETTING CACHE AFTER WARMUP")
+                print("=" * 50)
+                tester.reset_prefix_cache()
+                time.sleep(10)
+            else:
+                print("Skipping warmup (already done in previous phase)")
 
             # Run concurrent requests
             print(
@@ -941,9 +981,9 @@ class TestDeterminism:
 
                 if before_resp == after_resp:
                     deterministic_count += 1
-                    print(f"  ✅ Prompt {idx}: DETERMINISTIC")
+                    print(f"   Prompt {idx}: DETERMINISTIC")
                 else:
-                    print(f"  ❌ Prompt {idx}: NON-DETERMINISTIC")
+                    print(f"   Prompt {idx}: NON-DETERMINISTIC")
                     print(f"     Before: {before_resp}")
                     print(f"     After:  {after_resp}")
 

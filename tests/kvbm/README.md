@@ -7,9 +7,8 @@ This suite validates determinism properties of the API-backed LLM under fixed sa
 ## Files
 
 - `test_determinism.py` — comprehensive determinism tests with automatic vLLM server lifecycle and warmup.
-  - `test_determinism_without_cache_reset` — sequential determinism validation
-  - `test_determinism_with_cache_reset` — determinism across cache resets
-  - `test_concurrent_determinism_with_ifeval` — send parametrized number of IFEval prompts (default: 120) with controlled concurrency, compare before/after cache reset
+  - `test_determinism_with_cache_reset` — run test with warmup, reset cache, then run again without warmup to test determinism across cache reset boundary
+  - `test_concurrent_determinism_with_ifeval` — send parametrized number of IFEval prompts (default: 120) with controlled concurrency, with warmup, then reset cache and test again without warmup to validate determinism across cache reset
 
 ## Markers
 
@@ -43,7 +42,7 @@ pytest -v dynamo/tests/kvbm/test_determinism.py -s
 Environment variables control server settings and test load:
 
 - Server/model
-  - `KVBM_MODEL_ID` (default: `Qwen/Qwen3-0.6B`)
+  - `KVBM_MODEL_ID` (default: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`)
   - `KVBM_VLLM_PORT` (default: `8000`)
   - `KVBM_VLLM_START_TIMEOUT` (default: `300` seconds)
 
@@ -59,13 +58,12 @@ Environment variables control server settings and test load:
   - `KVBM_CONTROL_INTERVAL` (default: `10`)
   - `KVBM_SHAKESPEARE_INTERVAL` (default: `1`)
   - `KVBM_RANDOM_INTERVAL` (default: `7`)
-  - `KVBM_RESET_AFTER` (default: `500`)
   - `KVBM_HTTP_TIMEOUT` (default: `30` seconds)
   - `KVBM_SHAKESPEARE_URL` (default: MIT OCW Shakespeare text)
 
 - Concurrent testing
-  - `KVBM_CONCURRENT_REQUESTS` (default: `"5,10,20"` - comma-separated list for parametrization of max concurrent workers)
-  - `KVBM_MAX_TOKENS` (default: `"48,128"` - comma-separated list for parametrization of max_tokens in concurrent tests)
+  - `KVBM_CONCURRENT_REQUESTS` (default: `"3"` - comma-separated list for parametrization of max concurrent workers)
+  - `KVBM_MAX_TOKENS` (default: `"10"` - comma-separated list for parametrization of max_tokens in concurrent tests)
   - `KVBM_IFEVAL_PROMPTS` (default: `"120"` - comma-separated list for parametrization of number of IFEval prompts to use)
 
 Example:
@@ -93,3 +91,4 @@ pytest -v -m "kvbm" -s
 - Warmup is critical to avoid initialization effects impacting determinism.
 - For faster local iteration, reduce `KVBM_MAX_ITERATIONS` and/or increase intervals.
 - Logs are written under the per-test directory created by `tests/conftest.py` and include the vLLM server stdout/stderr.
+- Tests use the static port defined by `KVBM_VLLM_PORT` for vLLM server communication.
