@@ -442,6 +442,116 @@ impl TaskError {
     }
 }
 
+/// A handle to a spawned task that provides both join functionality and cancellation control
+///
+/// `TaskHandle` wraps a `JoinHandle` and provides access to the task's individual cancellation token.
+/// This allows fine-grained control over individual tasks while maintaining the familiar `JoinHandle` API.
+///
+/// # Example
+/// ```rust
+/// # use dynamo_runtime::utils::tasks::tracker::*;
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// # let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new())?;
+/// let handle = tracker.spawn(async {
+///     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+///     Ok(42)
+/// });
+///
+/// // Access the task's cancellation token
+/// let cancel_token = handle.cancellation_token();
+///
+/// // Can cancel the specific task
+/// // cancel_token.cancel();
+///
+/// // Await the task like a normal JoinHandle
+/// let result = handle.await?;
+/// assert_eq!(result?, 42);
+/// # Ok(())
+/// # }
+/// ```
+pub struct TaskHandle<T> {
+    join_handle: JoinHandle<Result<T, TaskError>>,
+    cancel_token: CancellationToken,
+}
+
+impl<T> TaskHandle<T> {
+    /// Create a new TaskHandle wrapping a JoinHandle and cancellation token
+    pub(crate) fn new(
+        join_handle: JoinHandle<Result<T, TaskError>>,
+        cancel_token: CancellationToken,
+    ) -> Self {
+        Self {
+            join_handle,
+            cancel_token,
+        }
+    }
+
+    /// Get the cancellation token for this specific task
+    ///
+    /// This token is a child of the tracker's cancellation token and can be used
+    /// to cancel just this individual task without affecting other tasks.
+    ///
+    /// # Example
+    /// ```rust
+    /// # use dynamo_runtime::utils::tasks::tracker::*;
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// # let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new())?;
+    /// let handle = tracker.spawn(async {
+    ///     tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+    ///     Ok("completed")
+    /// });
+    ///
+    /// // Cancel this specific task
+    /// handle.cancellation_token().cancel();
+    ///
+    /// // Task will be cancelled
+    /// let result = handle.await?;
+    /// assert!(result.is_err());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn cancellation_token(&self) -> &CancellationToken {
+        &self.cancel_token
+    }
+
+    /// Abort the task associated with this handle
+    ///
+    /// This is equivalent to calling `JoinHandle::abort()` and will cause the task
+    /// to be cancelled immediately without running any cleanup code.
+    pub fn abort(&self) {
+        self.join_handle.abort();
+    }
+
+    /// Check if the task associated with this handle has finished
+    ///
+    /// This is equivalent to calling `JoinHandle::is_finished()`.
+    pub fn is_finished(&self) -> bool {
+        self.join_handle.is_finished()
+    }
+}
+
+impl<T> std::future::Future for TaskHandle<T> {
+    type Output = Result<Result<T, TaskError>, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.join_handle).poll(cx)
+    }
+}
+
+impl<T> std::fmt::Debug for TaskHandle<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TaskHandle")
+            .field("join_handle", &"<JoinHandle>")
+            .field("cancel_token", &self.cancel_token)
+            .finish()
+    }
+}
+
 /// Trait for continuation tasks that execute after a failure
 ///
 /// This trait allows tasks to define what should happen next after a failure,
@@ -2253,7 +2363,7 @@ impl TaskTracker {
     /// * `future` - The async task to execute
     ///
     /// # Returns
-    /// A [`JoinHandle`] that can be used to await completion
+    /// A [`TaskHandle`] that can be used to await completion and access the task's cancellation token
     ///
     /// # Panics
     /// Panics if the tracker has been closed. This indicates a programming error
@@ -2269,11 +2379,14 @@ impl TaskTracker {
     ///     Ok(42)
     /// });
     ///
+    /// // Access the task's cancellation token
+    /// let cancel_token = handle.cancellation_token();
+    ///
     /// let result = handle.await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn spawn<F, T>(&self, future: F) -> JoinHandle<Result<T, TaskError>>
+    pub fn spawn<F, T>(&self, future: F) -> TaskHandle<T>
     where
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
@@ -2294,7 +2407,7 @@ impl TaskTracker {
     /// * `task_fn` - Function that takes a cancellation token and returns a future that resolves to `CancellableTaskResult<T>`
     ///
     /// # Returns
-    /// A [`JoinHandle`] that can be used to await completion
+    /// A [`TaskHandle`] that can be used to await completion and access the task's cancellation token
     ///
     /// # Panics
     /// Panics if the tracker has been closed. This indicates a programming error
@@ -2313,11 +2426,14 @@ impl TaskTracker {
     ///     }
     /// });
     ///
+    /// // Access the task's individual cancellation token
+    /// let task_cancel_token = handle.cancellation_token();
+    ///
     /// let result = handle.await?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn spawn_cancellable<F, Fut, T>(&self, task_fn: F) -> JoinHandle<Result<T, TaskError>>
+    pub fn spawn_cancellable<F, Fut, T>(&self, task_fn: F) -> TaskHandle<T>
     where
         F: FnMut(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
@@ -2506,10 +2622,7 @@ impl TaskTrackerInner {
     }
 
     /// Spawn implementation - validates tracker state, generates task ID, applies policies, and tracks execution
-    fn spawn<F, T>(
-        self: &Arc<Self>,
-        future: F,
-    ) -> Result<JoinHandle<Result<T, TaskError>>, TaskError>
+    fn spawn<F, T>(self: &Arc<Self>, future: F) -> Result<TaskHandle<T>, TaskError>
     where
         F: Future<Output = Result<T>> + Send + 'static,
         T: Send + 'static,
@@ -2525,6 +2638,9 @@ impl TaskTrackerInner {
         // Increment issued counter immediately when task is submitted
         self.metrics.increment_issued();
 
+        // Create a child cancellation token for this specific task
+        let task_cancel_token = self.cancel_token.child_token();
+
         // Clone the inner Arc to move into the task
         let inner = self.clone();
 
@@ -2533,14 +2649,17 @@ impl TaskTrackerInner {
             async move { Self::execute_with_policies(task_id, future, inner).await };
 
         // Let tokio handle the actual task tracking
-        Ok(self.tokio_tracker.spawn(wrapped_future))
+        let join_handle = self.tokio_tracker.spawn(wrapped_future);
+
+        // Wrap in TaskHandle with the child cancellation token
+        Ok(TaskHandle::new(join_handle, task_cancel_token))
     }
 
     /// Spawn cancellable implementation - validates state, provides cancellation token, handles CancellableTaskResult
     fn spawn_cancellable<F, Fut, T>(
         self: &Arc<Self>,
         task_fn: F,
-    ) -> Result<JoinHandle<Result<T, TaskError>>, TaskError>
+    ) -> Result<TaskHandle<T>, TaskError>
     where
         F: FnMut(CancellationToken) -> Fut + Send + 'static,
         Fut: Future<Output = CancellableTaskResult<T>> + Send + 'static,
@@ -2557,6 +2676,9 @@ impl TaskTrackerInner {
         // Increment issued counter immediately when task is submitted
         self.metrics.increment_issued();
 
+        // Create a child cancellation token for this specific task
+        let task_cancel_token = self.cancel_token.child_token();
+
         // Clone the inner Arc to move into the task
         let inner = self.clone();
 
@@ -2565,7 +2687,10 @@ impl TaskTrackerInner {
             async move { Self::execute_cancellable_with_policies(task_id, task_fn, inner).await };
 
         // Let tokio handle the actual task tracking
-        Ok(self.tokio_tracker.spawn(wrapped_future))
+        let join_handle = self.tokio_tracker.spawn(wrapped_future);
+
+        // Wrap in TaskHandle with the child cancellation token
+        Ok(TaskHandle::new(join_handle, task_cancel_token))
     }
 
     /// Cancel this tracker and all its tasks - implementation
@@ -5945,6 +6070,151 @@ mod tests {
                 *log
             );
         }
+    }
+
+    /// Test TaskHandle functionality
+    ///
+    /// This test verifies that:
+    /// 1. TaskHandle can be awaited like a JoinHandle
+    /// 2. TaskHandle provides access to the task's cancellation token
+    /// 3. Individual task cancellation works correctly
+    /// 4. TaskHandle methods (abort, is_finished) work as expected
+    #[tokio::test]
+    async fn test_task_handle_functionality() {
+        let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
+
+        // Test basic functionality - TaskHandle can be awaited
+        let handle1 = tracker.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            Ok("completed".to_string())
+        });
+
+        // Verify we can access the cancellation token
+        let cancel_token = handle1.cancellation_token();
+        assert!(
+            !cancel_token.is_cancelled(),
+            "Token should not be cancelled initially"
+        );
+
+        // Await the task
+        let result1 = handle1.await.expect("Task should complete");
+        assert!(result1.is_ok(), "Task should succeed");
+        assert_eq!(result1.unwrap(), "completed");
+
+        // Test individual task cancellation
+        let handle2 = tracker.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await; // Long task
+            Ok("should_be_cancelled".to_string())
+        });
+
+        let cancel_token2 = handle2.cancellation_token();
+
+        // Cancel this specific task
+        cancel_token2.cancel();
+
+        // The task should be cancelled
+        let result2 = handle2.await.expect("Task should complete");
+        assert!(result2.is_err(), "Task should be cancelled");
+        assert!(
+            result2.unwrap_err().is_cancellation(),
+            "Should be a cancellation error"
+        );
+
+        // Test that other tasks are not affected
+        let handle3 = tracker.spawn(async { Ok("not_cancelled".to_string()) });
+
+        let result3 = handle3.await.expect("Task should complete");
+        assert!(result3.is_ok(), "Other tasks should not be affected");
+        assert_eq!(result3.unwrap(), "not_cancelled");
+
+        // Test abort functionality
+        let handle4 = tracker.spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok("should_be_aborted".to_string())
+        });
+
+        // Check is_finished before abort
+        assert!(!handle4.is_finished(), "Task should not be finished yet");
+
+        // Abort the task
+        handle4.abort();
+
+        // Task should be aborted (JoinError)
+        let result4 = handle4.await;
+        assert!(result4.is_err(), "Aborted task should return JoinError");
+
+        // Verify metrics
+        assert_eq!(
+            tracker.metrics().success(),
+            2,
+            "Should have 2 successful tasks"
+        );
+        assert_eq!(
+            tracker.metrics().cancelled(),
+            1,
+            "Should have 1 cancelled task"
+        );
+        // Note: aborted tasks don't count as cancelled in our metrics
+    }
+
+    /// Test TaskHandle with cancellable tasks
+    #[tokio::test]
+    async fn test_task_handle_with_cancellable_tasks() {
+        let tracker = TaskTracker::new(UnlimitedScheduler::new(), LogOnlyPolicy::new()).unwrap();
+
+        // Test cancellable task with TaskHandle
+        let handle = tracker.spawn_cancellable(|cancel_token| async move {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(100)) => {
+                    CancellableTaskResult::Ok("completed".to_string())
+                },
+                _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
+            }
+        });
+
+        // Verify we can access the task's individual cancellation token
+        let task_cancel_token = handle.cancellation_token();
+        assert!(
+            !task_cancel_token.is_cancelled(),
+            "Task token should not be cancelled initially"
+        );
+
+        // Let the task complete normally
+        let result = handle.await.expect("Task should complete");
+        assert!(result.is_ok(), "Task should succeed");
+        assert_eq!(result.unwrap(), "completed");
+
+        // Test cancellation of cancellable task
+        let handle2 = tracker.spawn_cancellable(|cancel_token| async move {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+                    CancellableTaskResult::Ok("should_not_complete".to_string())
+                },
+                _ = cancel_token.cancelled() => CancellableTaskResult::Cancelled,
+            }
+        });
+
+        // Cancel the specific task
+        handle2.cancellation_token().cancel();
+
+        let result2 = handle2.await.expect("Task should complete");
+        assert!(result2.is_err(), "Task should be cancelled");
+        assert!(
+            result2.unwrap_err().is_cancellation(),
+            "Should be a cancellation error"
+        );
+
+        // Verify metrics
+        assert_eq!(
+            tracker.metrics().success(),
+            1,
+            "Should have 1 successful task"
+        );
+        assert_eq!(
+            tracker.metrics().cancelled(),
+            1,
+            "Should have 1 cancelled task"
+        );
     }
 
     /// Test FailedWithContinuation helper methods
