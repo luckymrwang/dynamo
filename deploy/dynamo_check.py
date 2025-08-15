@@ -16,27 +16,39 @@ Usage:
     dynamo_check.py --help                 # Show help
 
 Outputs:
-Dynamo Environment ($HOME/dynamo):
-└─ Runtime components (ai-dynamo-runtime 0.4.0):
-   ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.0.dist-info (created: 2025-08-12 15:10:05 PDT)
-   ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth (modified: 2025-08-12 15:10:05 PDT)
-      └─ Points to: $HOME/dynamo/lib/bindings/python/src
-   ├─ ✅ dynamo._core        $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so (modified: 2025-08-12 15:10:05 PDT)
-   ├─ ✅ dynamo.nixl_connect $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
-   ├─ ✅ dynamo.llm          $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
-   └─ ✅ dynamo.runtime      $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
-└─ Framework components (ai-dynamo - Not installed):
-   ├─ ❌ dynamo.frontend     No module named 'dynamo.frontend'
-   ├─ ✅ dynamo.planner      $HOME/dynamo/components/planner/src/dynamo/planner/__init__.py
-   ├─ ❌ dynamo.mocker       No module named 'dynamo.mocker'
-   ├─ ❌ dynamo.trtllm       No module named 'dynamo.trtllm'
-   ├─ ❌ dynamo.vllm         No module named 'dynamo.vllm'
-   ├─ ❌ dynamo.sglang       No module named 'dynamo.sglang'
-   └─ ❌ dynamo.llama_cpp    No module named 'dynamo.llama_cpp'
-└─ Cargo home directory: $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
-└─ Cargo target directory: $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
-   ├─ Debug:   $HOME/dynamo/.build/target/debug (modified: 2025-08-12 15:10:02 PDT)
-   └─ Binary:  $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so (modified: 2025-08-12 15:08:33 PDT)
+System info:
+├─ OS: Ubuntu 24.04.1 LTS (Noble Numbat) (Linux 6.11.0-28-generic x86_64); Memory: 30.9/125.5 GiB; Cores: 32
+├─ NVIDIA GPU: NVIDIA RTX 6000 Ada Generation (driver 570.133.07, CUDA 12.8); Power: 28.20/300.00 W; Memory: 2/49140 MiB
+├─ CUDA: driver 570.133.07, CUDA 12.8
+├─ Cargo (/usr/local/cargo/bin/cargo, cargo 1.87.0 (99624be96 2025-05-06))
+   ├─ Cargo home directory: $HOME/dynamo/.build/.cargo (CARGO_HOME is set)
+   └─ Cargo target directory: $HOME/dynamo/.build/target (CARGO_TARGET_DIR is set)
+      ├─ Debug:   $HOME/dynamo/.build/target/debug (modified: 2025-08-14 16:47:13 PDT)
+      ├─ Release: $HOME/dynamo/.build/target/release (modified: 2025-08-14 15:38:39 PDT)
+      └─ Binary:  $HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so (modified: 2025-08-14 16:45:31 PDT)
+├─ Maturin (/opt/dynamo/venv/bin/maturin, maturin 1.9.3)
+├─ Python: 3.12.3 (/opt/dynamo/venv/bin/python3); PYTHONPATH=:/home/ubuntu/dynamo/components/planner/src:
+   └─ Torch: 2.7.1+cu126 (✅torch.cuda.is_available())
+└─ Dynamo ($HOME/dynamo):
+   └─ Runtime components (ai-dynamo-runtime 0.4.0):
+      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime-0.4.0.dist-info (created: 2025-08-14 16:47:15 PDT)
+      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo_runtime.pth (modified: 2025-08-14 16:47:15 PDT)
+         └─ Points to: $HOME/dynamo/lib/bindings/python/src
+      ├─ ✅ dynamo._core        $HOME/dynamo/lib/bindings/python/src/dynamo/_core.cpython-312-x86_64-linux-gnu.so (modified: 2025-08-14 16:47:15 PDT)
+      ├─ ✅ dynamo.nixl_connect $HOME/dynamo/lib/bindings/python/src/dynamo/nixl_connect/__init__.py
+      ├─ ✅ dynamo.llm          $HOME/dynamo/lib/bindings/python/src/dynamo/llm/__init__.py
+      └─ ✅ dynamo.runtime      $HOME/dynamo/lib/bindings/python/src/dynamo/runtime/__init__.py
+   └─ Framework components (ai-dynamo 0.4.0):
+      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/ai_dynamo-0.4.0.dist-info (created: 2025-08-14 16:47:16 PDT)
+      ├─ /opt/dynamo/venv/lib/python3.12/site-packages/_ai_dynamo.pth (modified: 2025-08-14 16:47:16 PDT)
+         └─ Points to: $HOME/dynamo/components/backends/vllm/src
+      ├─ ✅ dynamo.frontend     $HOME/dynamo/components/frontend/src/dynamo/frontend/__init__.py
+      ├─ ✅ dynamo.planner      $HOME/dynamo/components/planner/src/dynamo/planner/__init__.py
+      ├─ ✅ dynamo.mocker       $HOME/dynamo/components/backends/mocker/src/dynamo/mocker/__init__.py
+      ├─ ✅ dynamo.trtllm       $HOME/dynamo/components/backends/trtllm/src/dynamo/trtllm/__init__.py
+      ├─ ✅ dynamo.vllm         $HOME/dynamo/components/backends/vllm/src/dynamo/vllm/__init__.py
+      ├─ ✅ dynamo.sglang       $HOME/dynamo/components/backends/sglang/src/dynamo/sglang/__init__.py
+      └─ ✅ dynamo.llama_cpp    $HOME/dynamo/components/backends/llama_cpp/src/dynamo/llama_cpp/__init__.py
 
 Missing framework components. You can choose one of the following options:
 1. For development mode (fast build, editable installation):
@@ -62,6 +74,188 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 
+class NVIDIAGPUDetector:
+    """Handles NVIDIA GPU detection and information gathering."""
+
+    def find_nvidia_smi(self) -> Optional[str]:
+        """Find nvidia-smi executable."""
+        nvsmi = shutil.which("nvidia-smi")
+        if not nvsmi:
+            for candidate in [
+                "/usr/bin/nvidia-smi",
+                "/usr/local/bin/nvidia-smi",
+                "/usr/local/nvidia/bin/nvidia-smi",
+            ]:
+                if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                    return candidate
+        return nvsmi
+
+    def get_nvidia_gpu_names(self, nvsmi: str) -> Tuple[List[str], bool]:
+        """Get list of NVIDIA GPU names and whether nvidia-smi succeeded.
+
+        Returns:
+            Tuple of (gpu_names_list, nvidia_smi_succeeded)
+        """
+        try:
+            proc = subprocess.run(
+                [nvsmi, "-L"], capture_output=True, text=True, timeout=10
+            )
+            if proc.returncode == 0:
+                names = []
+                if proc.stdout:
+                    for line in proc.stdout.splitlines():
+                        line = line.strip()
+                        # Example: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-...)"
+                        if ":" in line:
+                            part = line.split(":", 1)[1].strip()
+                            # Take up to first parenthesis for clean model name
+                            name_only = part.split("(")[0].strip()
+                            names.append(name_only)
+                return names, True
+            else:
+                return [], False
+        except Exception:
+            return [], False
+
+    def get_nvidia_driver_cuda_versions(self, nvsmi: str) -> Tuple[str, str]:
+        """Get NVIDIA driver and CUDA versions.
+
+        Returns:
+            Tuple of (driver_version, cuda_version)
+        """
+        driver, cuda = "?", "?"
+        try:
+            # Try query method first
+            proc = subprocess.run(
+                [
+                    nvsmi,
+                    "--query-gpu=driver_version,cuda_version",
+                    "--format=csv,noheader",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                parts = proc.stdout.strip().splitlines()[0].split(",")
+                if len(parts) >= 1:
+                    driver = parts[0].strip()
+                if len(parts) >= 2:
+                    cuda = parts[1].strip()
+            else:
+                # Fallback: parse banner
+                proc = subprocess.run(
+                    [nvsmi], capture_output=True, text=True, timeout=10
+                )
+                if proc.returncode == 0 and proc.stdout:
+                    import re
+
+                    m = re.search(r"Driver Version:\s*([0-9.]+)", proc.stdout)
+                    if m:
+                        driver = m.group(1)
+                    m = re.search(r"CUDA Version:\s*([0-9.]+)", proc.stdout)
+                    if m:
+                        cuda = m.group(1)
+        except Exception:
+            pass
+        return driver, cuda
+
+    def get_nvidia_power_memory_all(self, nvsmi: str, gpu_count: int) -> List[str]:
+        """Get NVIDIA GPU power and memory info for all GPUs.
+
+        Returns:
+            List of formatted strings for each GPU
+        """
+        try:
+            proc = subprocess.run(
+                [
+                    nvsmi,
+                    "--query-gpu=power.draw,power.limit,memory.used,memory.total",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode != 0 or not proc.stdout.strip():
+                return [""] * gpu_count
+
+            lines = proc.stdout.strip().splitlines()
+            gpu_infos = []
+
+            for i, line in enumerate(lines[:gpu_count]):  # Limit to expected GPU count
+                parts = line.split(",")
+                if len(parts) < 4:
+                    gpu_infos.append("")
+                    continue
+
+                power_draw = parts[0].strip() if parts[0].strip() else "?"
+                power_limit = parts[1].strip() if parts[1].strip() else "?"
+                mem_used = parts[2].strip() if parts[2].strip() else "?"
+                mem_total = parts[3].strip() if parts[3].strip() else "?"
+
+                info_parts = []
+                if power_draw != "?" or power_limit != "?":
+                    info_parts.append(f"Power: {power_draw}/{power_limit} W")
+
+                if mem_used != "?" and mem_total != "?":
+                    # Add warning symbol if GPU memory usage is 90% or higher
+                    warning_symbol = ""
+                    try:
+                        mem_usage_percent = (float(mem_used) / float(mem_total)) * 100
+                        warning_symbol = " ⚠️" if mem_usage_percent >= 90 else ""
+                    except (ValueError, ZeroDivisionError):
+                        pass
+                    info_parts.append(
+                        f"Memory: {mem_used}/{mem_total} MiB{warning_symbol}"
+                    )
+
+                gpu_infos.append("; " + "; ".join(info_parts) if info_parts else "")
+
+            # Fill remaining slots if we got fewer results than expected
+            while len(gpu_infos) < gpu_count:
+                gpu_infos.append("")
+
+            return gpu_infos
+        except Exception:
+            return [""] * gpu_count
+
+    def get_gpu_info(self) -> Tuple[List[str], Optional[str], Optional[str]]:
+        """Get NVIDIA GPU information.
+
+        Returns:
+            Tuple of (gpu_lines_list, driver_version, cuda_version)
+        """
+        nvsmi = self.find_nvidia_smi()
+        if not nvsmi:
+            return ["❌ NVIDIA GPU: nvidia-smi not found"], None, None
+
+        names, nvsmi_succeeded = self.get_nvidia_gpu_names(nvsmi)
+        if not nvsmi_succeeded:
+            return ["❌ NVIDIA GPU: nvidia-smi failed"], None, None
+
+        driver, cuda = self.get_nvidia_driver_cuda_versions(nvsmi)
+
+        # Format GPU lines
+        if not names:
+            return [f"NVIDIA GPU: (driver {driver}, CUDA {cuda})"], driver, cuda
+
+        if len(names) == 1:
+            # Single GPU - keep compact format
+            power_mem_infos = self.get_nvidia_power_memory_all(nvsmi, 1)
+            gpu_line = f"NVIDIA GPU: {names[0]} (driver {driver}, CUDA {cuda}){power_mem_infos[0]}"
+            return [gpu_line], driver, cuda
+        else:
+            # Multiple GPUs - show each individually
+            power_mem_infos = self.get_nvidia_power_memory_all(nvsmi, len(names))
+            gpu_lines = []
+            for i, name in enumerate(names):
+                power_mem_info = power_mem_infos[i] if i < len(power_mem_infos) else ""
+                gpu_line = f"NVIDIA GPU {i}: {name} (driver {driver}, CUDA {cuda}){power_mem_info}"
+                gpu_lines.append(gpu_line)
+            return gpu_lines, driver, cuda
+
+
 class DynamoChecker:
     """Comprehensive dynamo package checker."""
 
@@ -74,6 +268,8 @@ class DynamoChecker:
         self._suppress_planner_warnings()
         # Collect warnings that should be printed later (after specific headers)
         self._deferred_messages: List[str] = []
+        # Initialize NVIDIA GPU detector
+        self.gpu_detector = NVIDIAGPUDetector()
 
     def _suppress_planner_warnings(self):
         """Suppress Prometheus endpoint warnings from planner module during import testing."""
@@ -366,8 +562,11 @@ class DynamoChecker:
 
         extras = []
         if mem_used_gib is not None and mem_total_gib is not None:
-            mem_usage_percent = (mem_used_gib / mem_total_gib) * 100
-            warning_symbol = " ⚠️" if mem_usage_percent >= 90 else ""
+            if mem_total_gib > 0:
+                mem_usage_percent = (mem_used_gib / mem_total_gib) * 100
+                warning_symbol = " ⚠️" if mem_usage_percent >= 90 else ""
+            else:
+                warning_symbol = ""
             extras.append(
                 f"Memory: {mem_used_gib:.1f}/{mem_total_gib:.1f} GiB{warning_symbol}"
             )
@@ -377,185 +576,11 @@ class DynamoChecker:
         # Defer printing until we have all three lines; we print as a tree below
 
         # GPU info
-        gpu_line = "GPU: none detected"
-        gpu_driver_version: Optional[str] = None
-        gpu_cuda_version: Optional[str] = None
-        try:
-            # Locate nvidia-smi robustly
-            nvsmi = shutil.which("nvidia-smi")
-            if not nvsmi:
-                for candidate in [
-                    "/usr/bin/nvidia-smi",
-                    "/usr/local/bin/nvidia-smi",
-                    "/usr/local/nvidia/bin/nvidia-smi",
-                ]:
-                    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-                        nvsmi = candidate
-                        break
-
-            if nvsmi:
-                # Fast list to count GPUs and get first name
-                proc_list = subprocess.run(
-                    [nvsmi, "-L"], capture_output=True, text=True, timeout=10
-                )
-                names: List[str] = []
-                if proc_list.returncode == 0 and proc_list.stdout:
-                    for line in proc_list.stdout.splitlines():
-                        line = line.strip()
-                        # Example: "GPU 0: NVIDIA A100-SXM4-40GB (UUID: GPU-...)"
-                        if ":" in line:
-                            part = line.split(":", 1)[1].strip()
-                            # Take up to first parenthesis for clean model name
-                            name_only = part.split("(")[0].strip()
-                            names.append(name_only)
-                else:
-                    # nvidia-smi failed - capture the error
-                    error_msg = (
-                        proc_list.stderr.strip()
-                        if proc_list.stderr
-                        else "Unknown error"
-                    )
-                    gpu_line = f"❌ GPU: nvidia-smi failed - {error_msg}"
-                    gpu_driver_version = None
-                    gpu_cuda_version = None
-                    # Skip further nvidia-smi queries since it's failing
-                    names = []
-
-                # Query driver and CUDA (only if nvidia-smi list succeeded)
-                driver = "?"
-                cuda = "?"
-                if names:  # Only proceed if we successfully got GPU names
-                    proc_q = subprocess.run(
-                        [
-                            nvsmi,
-                            "--query-gpu=driver_version,cuda_version",
-                            "--format=csv,noheader",
-                        ],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    if proc_q.returncode == 0 and proc_q.stdout.strip():
-                        first = proc_q.stdout.strip().splitlines()[0].split(",")
-                        if len(first) >= 1:
-                            driver = first[0].strip()
-                        if len(first) >= 2:
-                            cuda = first[1].strip()
-                    else:
-                        # Fallback: parse banner
-                        proc_b = subprocess.run(
-                            [nvsmi], capture_output=True, text=True, timeout=10
-                        )
-                        if proc_b.returncode == 0 and proc_b.stdout:
-                            import re
-
-                            m = re.search(r"Driver Version:\s*([0-9.]+)", proc_b.stdout)
-                            if m:
-                                driver = m.group(1)
-                            m = re.search(r"CUDA Version:\s*([0-9.]+)", proc_b.stdout)
-                            if m:
-                                cuda = m.group(1)
-
-                    gpu_driver_version = driver
-                    gpu_cuda_version = cuda
-
-                # Query power and memory usage/limits (first GPU) - only if names available
-                if names:  # Only proceed if we successfully got GPU names
-                    power_draw_w: Optional[str] = None
-                    power_limit_w: Optional[str] = None
-                    mem_used_mib: Optional[str] = None
-                    mem_total_mib: Optional[str] = None
-                    try:
-                        proc_pm = subprocess.run(
-                            [
-                                nvsmi,
-                                "--query-gpu=power.draw,power.limit,memory.used,memory.total",
-                                "--format=csv,noheader,nounits",
-                            ],
-                            capture_output=True,
-                            text=True,
-                            timeout=10,
-                        )
-                        if proc_pm.returncode == 0 and proc_pm.stdout.strip():
-                            first_pm = proc_pm.stdout.strip().splitlines()[0].split(",")
-                            if len(first_pm) >= 1:
-                                power_draw_w = first_pm[0].strip()
-                            if len(first_pm) >= 2:
-                                power_limit_w = first_pm[1].strip()
-                            if len(first_pm) >= 3:
-                                mem_used_mib = first_pm[2].strip()
-                            if len(first_pm) >= 4:
-                                mem_total_mib = first_pm[3].strip()
-                    except Exception:
-                        pass
-
-                    power_mem_suffix = ""
-                    if any([power_draw_w, power_limit_w, mem_used_mib, mem_total_mib]):
-                        # Build terse summary; include only available parts
-                        parts = []
-                        if power_draw_w or power_limit_w:
-                            pd = power_draw_w if power_draw_w is not None else "?"
-                            pl = power_limit_w if power_limit_w is not None else "?"
-                            parts.append(f"Power: {pd}/{pl} W")
-                        if mem_used_mib or mem_total_mib:
-                            mu = mem_used_mib if mem_used_mib is not None else "?"
-                            mt = mem_total_mib if mem_total_mib is not None else "?"
-                            # Add warning symbol if GPU memory usage is 90% or higher
-                            if mu != "?" and mt != "?":
-                                try:
-                                    mem_usage_percent = (float(mu) / float(mt)) * 100
-                                    warning_symbol = (
-                                        " ⚠️" if mem_usage_percent >= 90 else ""
-                                    )
-                                except (ValueError, ZeroDivisionError):
-                                    warning_symbol = ""
-                            else:
-                                warning_symbol = ""
-                            parts.append(f"Memory: {mu}/{mt} MiB{warning_symbol}")
-                        power_mem_suffix = "; " + "; ".join(parts)
-
-                    if names:
-                        gpu_count = len(names)
-                        first_name = names[0]
-                        if gpu_count == 1:
-                            gpu_line = f"GPU: NVIDIA {first_name} (driver {driver}, CUDA {cuda}){power_mem_suffix}"
-                        else:
-                            gpu_line = f"GPU: NVIDIA x{gpu_count} ({first_name} first) (driver {driver}, CUDA {cuda}){power_mem_suffix}"
-                    else:
-                        # No names but nvidia-smi present; still report driver/cuda
-                        gpu_line = f"GPU: NVIDIA (driver {driver}, CUDA {cuda}){power_mem_suffix}"
-
-            elif shutil.which("rocm-smi"):
-                proc = subprocess.run(
-                    ["rocm-smi", "-i"], capture_output=True, text=True, timeout=3
-                )
-                if proc.returncode == 0:
-                    # Heuristic: count lines mentioning gfx or card
-                    lines = proc.stdout.splitlines()
-                    amd_gpus = [
-                        line_text
-                        for line_text in lines
-                        if "Card" in line_text or "gfx" in line_text
-                    ]
-                    count = len(amd_gpus) if amd_gpus else 1
-                    gpu_line = f"GPU: AMD ROCm x{count}"
-            elif shutil.which("lspci"):
-                proc = subprocess.run(
-                    ["lspci"], capture_output=True, text=True, timeout=3
-                )
-                if proc.returncode == 0:
-                    txt = proc.stdout.lower()
-                    if "nvidia" in txt:
-                        gpu_line = "GPU: NVIDIA (detected via lspci)"
-                    elif "advanced micro devices" in txt or "amd" in txt:
-                        gpu_line = "GPU: AMD (detected via lspci)"
-                    elif "intel corporation" in txt and ("vga" in txt or "3d" in txt):
-                        gpu_line = "GPU: Intel (detected via lspci)"
-        except Exception:
-            pass
-        # Mark clearly when GPU not found
-        if gpu_line == "GPU: none detected":
-            gpu_line = "❌ " + gpu_line
+        (
+            gpu_lines,
+            gpu_driver_version,
+            gpu_cuda_version,
+        ) = self.gpu_detector.get_gpu_info()
         # Python info
         py_ver = platform.python_version()
         py_exec = sys.executable or "python"
@@ -587,16 +612,6 @@ class DynamoChecker:
         # Extra lines for additional system info
         extra_lines: List[str] = []
 
-        # Prepare CUDA line (single, compact) and print System info in required order
-        # Use driver/CUDA version from nvidia-smi when available
-        cuda_line: Optional[str] = None
-        if gpu_driver_version is not None or gpu_cuda_version is not None:
-            d = gpu_driver_version if gpu_driver_version is not None else "unknown"
-            c = gpu_cuda_version if gpu_cuda_version is not None else "unknown"
-            cuda_line = f"CUDA: driver {d}, CUDA {c}"
-        else:
-            cuda_line = "❌ CUDA: not found"
-
         # Detect cargo binary path and version for heading
         cargo_path = shutil.which("cargo")
         cargo_version = None
@@ -612,14 +627,20 @@ class DynamoChecker:
         cargo_target, cargo_home = self._get_cargo_info()
         has_cargo = bool(cargo_path or cargo_home or cargo_target)
 
-        print(
-            f"""System info:
-├─ {linux_line}
-├─ {gpu_line}"""
-        )
-        # CUDA right after GPU, if available (power/memory already appended to GPU line)
-        if cuda_line:
-            print(f"├─ {cuda_line}")
+        # Build system info output
+        system_output = ["System info:", f"├─ {linux_line}"]
+
+        # Add GPU lines - handle single or multiple GPUs
+        if len(gpu_lines) == 1:
+            system_output.append(f"├─ {gpu_lines[0]}")
+        else:
+            for i, gpu_line in enumerate(gpu_lines):
+                # Last GPU gets ├─, others get ├─ too
+                system_output.append(f"├─ {gpu_line}")
+
+        print("\n".join(system_output))
+
+        # CUDA line removed - driver/CUDA versions already shown in NVIDIA GPU line
         # Extra lines (e.g., CUDA memory clear status)
         for i, line in enumerate(extra_lines):
             # If cargo follows after extra lines, use mid symbol; else close on last
