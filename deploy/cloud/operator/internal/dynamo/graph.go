@@ -687,13 +687,13 @@ func GenerateBasePodSpec(
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-) (corev1.PodSpec, error) {
+) (*corev1.PodSpec, error) {
 	// Start with base container generated per component type
 	componentContext := generateComponentContext(component, parentGraphDeploymentName, namespace, numberOfNodes)
 	componentDefaults := ComponentDefaultsFactory(component.ComponentType)
 	container, err := componentDefaults.GetBaseContainer(componentContext)
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("failed to get base container: %w", err)
+		return nil, fmt.Errorf("failed to get base container: %w", err)
 	}
 
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
@@ -702,7 +702,7 @@ func GenerateBasePodSpec(
 			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
 			err = mergo.Merge(&container, *main, mergo.WithOverride)
 			if err != nil {
-				return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
 
 			// main container fields that require special handling
@@ -725,7 +725,7 @@ func GenerateBasePodSpec(
 
 	overrideResources, err := controller_common.GetResourcesConfig(component.Resources)
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("failed to get resources config: %w", err)
+		return nil, fmt.Errorf("failed to get resources config: %w", err)
 	}
 	// Requests
 	if overrideResources != nil && len(overrideResources.Requests) > 0 {
@@ -784,32 +784,32 @@ func GenerateBasePodSpec(
 	// Apply backend-specific container modifications
 	multinodeDeployer := MultinodeDeployerFactory(multinodeDeploymentType)
 	if multinodeDeployer == nil {
-		return corev1.PodSpec{}, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
+		return nil, fmt.Errorf("unsupported multinode deployment type: %s", multinodeDeploymentType)
 	}
 	backend := BackendFactory(backendFramework)
 	if backend == nil {
-		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
+		return nil, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, serviceName, multinodeDeployer)
 
 	// get base podspec from component
 	podSpec, err := componentDefaults.GetBasePodSpec(componentContext)
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("failed to get base podspec: %w", err)
+		return nil, fmt.Errorf("failed to get base podspec: %w", err)
 	}
 
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		// merge extraPodSpec PodSpec with base podspec
 		err := mergo.Merge(&podSpec, component.ExtraPodSpec.PodSpec.DeepCopy(), mergo.WithOverride)
 		if err != nil {
-			return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+			return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 		}
 	}
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
 	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, serviceName)
-	return podSpec, nil
+	return controller_common.CanonicalizePodSpec(&podSpec), nil
 }
 
 func setMetricsLabels(labels map[string]string, dynamoGraphDeployment *v1alpha1.DynamoGraphDeployment) {
@@ -846,13 +846,13 @@ func GeneratePodSpecForComponent(
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
 	serviceName string,
-) (corev1.PodSpec, error) {
+) (*corev1.PodSpec, error) {
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
 	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Name, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
 	if err != nil {
-		return corev1.PodSpec{}, err
+		return nil, err
 	}
 	return podSpec, nil
 }
@@ -913,7 +913,7 @@ func GenerateGrovePodGangSet(
 				Spec: grovev1alpha1.PodCliqueSpec{
 					RoleName: strings.ToLower(r.Name),
 					Replicas: r.Replicas,
-					PodSpec:  podSpec,
+					PodSpec:  *podSpec,
 				},
 			}
 			labels, err := generateLabels(component, dynamoDeployment, r.Name)
@@ -1141,7 +1141,7 @@ func GenerateBasePodSpecForController(
 	controllerConfig controller_common.Config,
 	role Role,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
-) (corev1.PodSpec, error) {
+) (*corev1.PodSpec, error) {
 	// Convert to our interface
 	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
 
@@ -1150,7 +1150,7 @@ func GenerateBasePodSpecForController(
 	// Determine backend framework using hybrid approach
 	backendFramework, err := getBackendFrameworkFromDynamoComponent(dynComponent)
 	if err != nil {
-		return corev1.PodSpec{}, fmt.Errorf("failed to determine backend framework: %w", err)
+		return nil, fmt.Errorf("failed to determine backend framework: %w", err)
 	}
 
 	// Generate base PodSpec with standard env vars using merged component envs
@@ -1169,7 +1169,7 @@ func GenerateBasePodSpecForController(
 		serviceName,
 	)
 	if err != nil {
-		return corev1.PodSpec{}, err
+		return nil, err
 	}
 
 	return podSpec, nil
