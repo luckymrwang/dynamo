@@ -103,6 +103,22 @@ class NVIDIAGPUDetector:
                             names.append(name_only)
                 return names, True
             else:
+                # Collect and surface error details (e.g. "Failed to initialize NVML: Unknown Error")
+                errors: List[str] = []
+                if proc.stderr:
+                    for line in proc.stderr.splitlines():
+                        line = line.strip()
+                        if line:
+                            errors.append(line)
+                if not errors and proc.stdout:
+                    for line in proc.stdout.splitlines():
+                        line = line.strip()
+                        if line:
+                            errors.append(line)
+
+                if errors:
+                    # Return the first error line to display concisely upstream
+                    return [errors[0]], False
                 return [], False
         except Exception:
             return [], False
@@ -220,15 +236,24 @@ class NVIDIAGPUDetector:
         if not nvsmi:
             return ["❌ NVIDIA GPU: nvidia-smi not found"], None, None
 
-        names, nvsmi_succeeded = self.get_nvidia_gpu_names(nvsmi)
+        names_or_errors, nvsmi_succeeded = self.get_nvidia_gpu_names(nvsmi)
         if not nvsmi_succeeded:
+            # If error details were captured, display them directly
+            if names_or_errors:
+                return [f"❌ NVIDIA GPU: {names_or_errors[0]}"], None, None
             return ["❌ NVIDIA GPU: nvidia-smi failed"], None, None
 
         driver, cuda = self.get_nvidia_driver_cuda_versions(nvsmi)
 
         # Format GPU lines
+        names = names_or_errors
         if not names:
-            return [f"NVIDIA GPU: (driver {driver}, CUDA {cuda})"], driver, cuda
+            # Treat zero GPUs as an error condition
+            return (
+                [f"❌ NVIDIA GPU: not detected (driver {driver}, CUDA {cuda})"],
+                driver,
+                cuda,
+            )
 
         if len(names) == 1:
             # Single GPU - keep compact format
@@ -249,7 +274,7 @@ class NVIDIAGPUDetector:
 class DynamoChecker:
     """Comprehensive dynamo package checker."""
 
-    def __init__(self, workspace_dir: Optional[str] = None):
+    def __init__(self, workspace_dir: Optional[str] = None) -> None:
         # If a path is provided, use it directly; otherwise discover
         self.workspace_dir = (
             os.path.abspath(workspace_dir) if workspace_dir else self._find_workspace()
@@ -260,8 +285,10 @@ class DynamoChecker:
         self._deferred_messages: List[str] = []
         # Initialize NVIDIA GPU detector
         self.gpu_detector = NVIDIAGPUDetector()
+        # Track whether GPU issues were detected (nvidia-smi failure or zero GPUs)
+        self._gpu_error: bool = False
 
-    def _suppress_planner_warnings(self):
+    def _suppress_planner_warnings(self) -> None:
         """Suppress Prometheus endpoint warnings from planner module during import testing."""
         # The planner module logs a warning about Prometheus endpoint when imported
         # outside of a Kubernetes cluster. Suppress this for cleaner output.
@@ -416,8 +443,11 @@ class DynamoChecker:
             Example: '/home/ubuntu/dynamo/a:/home/ubuntu/dynamo/b' -> '$HOME/dynamo/a:$HOME/dynamo/b'
         """
         home_dir = os.path.expanduser("~")
-        # Replace all occurrences for colon-separated paths like PYTHONPATH
-        return path.replace(home_dir, "$HOME")
+        try:
+            # Replace all occurrences for colon-separated paths like PYTHONPATH
+            return path.replace(home_dir, "$HOME")
+        except Exception:
+            return path
 
     def _format_timestamp_pdt(self, timestamp: float) -> str:
         """Format a timestamp in PDT timezone.
@@ -785,12 +815,21 @@ class DynamoChecker:
         else:
             # Show as a child under Python
             print("   └─ ❌ Torch: not installed")
-        # Determine if any errors were printed in system info (treat only Python and Cargo as fatal here)
+        # Determine if any errors were printed in system info
         system_errors_found = False
         if isinstance(python_line, str) and python_line.startswith("❌"):
             system_errors_found = True
         if not has_cargo:
             system_errors_found = True
+        # Mark GPU error based on lines printed; treat as error for overall status as well
+        try:
+            self._gpu_error = any(
+                isinstance(line, str) and line.startswith("❌") for line in gpu_lines
+            )
+            if self._gpu_error:
+                system_errors_found = True
+        except Exception:
+            pass
         return system_errors_found
 
     def _find_so_file(self, target_directory: str) -> Optional[str]:
@@ -889,7 +928,7 @@ class DynamoChecker:
             except OSError:
                 return None
 
-    def _setup_pythonpath(self):
+    def _setup_pythonpath(self) -> None:
         """Set up PYTHONPATH for component imports."""
         if not self.workspace_dir:
             return
@@ -1331,125 +1370,32 @@ class DynamoChecker:
 
         return results
 
-    def _show_build_options(self, display_pythonpath: str):
-        """Show build options for missing framework components.
+    def _show_build_options(self, display_pythonpath: Optional[str] = None) -> None:
+        """Show usage/build guidance including PYTHONPATH export.
 
         Args:
-            display_pythonpath: PYTHONPATH string with $HOME replacement
+            display_pythonpath: Optional precomputed PYTHONPATH string with $HOME replacement
         """
-        # Get cargo target directory dynamically
-        cargo_target, _ = self._get_cargo_info()
-        cargo_target_dir = cargo_target if cargo_target else "target"
+        # Compute display_pythonpath if not provided
+        if not display_pythonpath:
+            if self.workspace_dir:
+                pythonpath = self._get_pythonpath()
+                display_pythonpath = (
+                    self._replace_home_with_var(pythonpath)
+                    if pythonpath
+                    else "$HOME/dynamo/components/*/src"
+                )
+            else:
+                display_pythonpath = "$HOME/dynamo/components/*/src"
 
+        # Single source of truth for the export command
         print(
-            f"""
-Missing framework components. You can choose one of the following options:
-
-1. For development mode (fast build, editable installation):
-   # Step 1: Uninstall existing packages to ensure clean installation
-   uv pip uninstall ai-dynamo ai-dynamo-runtime
-
-   # Step 2: Compiles Rust code to native binaries with debug optimization (using subshell for env vars)
-   # Output: {cargo_target_dir}/debug/ directory with .so files
-   (cd {self.workspace_dir} && CARGO_INCREMENTAL=1 RUSTFLAGS="-C opt-level=0 -C codegen-units=256" cargo build --locked --features dynamo-llm/block-manager --workspace)
-   # Step 3: Creates editable Python installation (no wheel file)
-   # Output: .pth files in site-packages, links to source code
-   (cd {self.workspace_dir}/lib/bindings/python && maturin develop --uv --features block-manager)
-
-2. For production mode (slower build, optimized wheels):
-
-   # Step 1: Clear development environment variables for production builds
-   unset CARGO_INCREMENTAL
-   unset RUSTFLAGS
-
-   # Step 2: Uninstall existing packages to ensure clean installation
-   uv pip uninstall ai-dynamo ai-dynamo-runtime
-
-   # Step 3: Compile Rust code with full optimization for production
-   # Output: {cargo_target_dir}/release/ directory with optimized .so files (~45MB)
-   (cd {self.workspace_dir} && cargo build --release --locked --features dynamo-llm/block-manager --workspace)
-
-   # Step 4: Clean up any existing wheel files for clean output
-   # This ensures no conflicts with previous builds
-   rm -f {cargo_target_dir}/wheels/*.whl
-
-   # Step 5: Build ai-dynamo-runtime package (Rust extensions + Python bindings)
-   # Output: ai_dynamo_runtime-*.whl wheel file (~16MB)
-   # Contains: dynamo._core.so (~45MB Rust), Python modules (~16MB)
-   (cd {self.workspace_dir}/lib/bindings/python && maturin build --release --features block-manager --out {cargo_target_dir}/wheels)
-
-   # Step 6: Install the runtime wheel package
-   # This makes dynamo._core, dynamo.runtime, dynamo.llm available
-   (cd {cargo_target_dir}/wheels && uv pip install --upgrade --force-reinstall --no-deps ai_dynamo_runtime-*.whl)
-
-   # Step 7: Build ai-dynamo framework package (Complete framework with all components)
-   # Output: ai_dynamo-*.whl wheel file (~90KB)
-   # Contains: frontend, planner, backends (vllm, sglang, trtllm, llama_cpp, mocker)
-   (cd {self.workspace_dir} && pip wheel --no-deps --wheel-dir {cargo_target_dir}/wheels .)
-
-   # Step 8: Install the framework wheel package
-   # This makes dynamo.frontend, dynamo.planner, dynamo.vllm, etc. available
-   (cd {cargo_target_dir}/wheels && uv pip install --upgrade --find-links . ai_dynamo-*.whl)
-
-3. For immediate testing (no rebuild), set PYTHONPATH:
-   dynamo_check.py --try-pythonpath --import-check-only
-   export PYTHONPATH="{display_pythonpath}" """
+            f'\nSet PYTHONPATH for development:\nexport PYTHONPATH="{display_pythonpath}"\n'
         )
 
     # ====================================================================
     # USAGE EXAMPLES AND GUIDANCE
     # ====================================================================
-
-    def show_usage_examples(self):
-        print(
-            """
-Usage Examples
-========================================
-
-1. Start Frontend Server:
-   python -m dynamo.frontend --http-port 8000
-
-2. Start vLLM Backend:
-   python -m dynamo.vllm --model Qwen/Qwen2.5-0.5B
-
-3. Send Inference Request:
-   curl -X POST http://localhost:8000/v1/completions \\
-        -H 'Content-Type: application/json' \\
-        -d '{"model": "Qwen/Qwen2.5-0.5B", "prompt": "Hello", "max_tokens": 50}'
-
-4. For local development: Set PYTHONPATH to use workspace sources without rebuilding:
-   • Discover what PYTHONPATH to set: dynamo_check.py --try-pythonpath --import-check-only"""
-        )
-        if self.workspace_dir:
-            pythonpath = self._get_pythonpath()
-            display_pythonpath = self._replace_home_with_var(pythonpath)
-            print(
-                f'   • Then set in your shell: export PYTHONPATH="{display_pythonpath}"'
-            )
-        else:
-            print(
-                '   • Then set in your shell: export PYTHONPATH="$HOME/dynamo/components/*/src"'
-            )
-
-        print(
-            """
-5. Build Packages:
-   # See detailed build commands in the troubleshooting section above
-   # (Development mode: Fast build, editable installation)
-   # (Production mode: Slower build, optimized wheels)
-
-6. Troubleshooting:
-   # CUDA Memory Issues:
-   # If you encounter CUDA memory problems, you can clear the cache manually:
-   # python -c "import torch; torch.cuda.empty_cache() if torch.cuda.is_available() else None"
-   # python -c "import torch; torch.cuda.reset_peak_memory_stats() if torch.cuda.is_available() else None"
-
-   # GPU Detection Issues:
-   # If GPU info is not showing correctly, check:
-   # - nvidia-smi is installed and working
-   # - GPU drivers are properly installed
-   # - CUDA toolkit is available"""
-        )
 
     def _get_pythonpath(self) -> str:
         """Generate PYTHONPATH recommendation string.
@@ -1505,17 +1451,17 @@ Usage Examples
         import_results = self.results.get("imports", {})
         has_failures = any(result.startswith("❌") for result in import_results.values())
 
-        # Provide guidance (show examples only if all checks succeed and no errors flagged)
+        # Provide guidance (show only if all checks succeed and no errors flagged)
         had_errors_flag = bool(self.results.get("had_errors"))
         if not has_failures and not had_errors_flag:
-            self.show_usage_examples()
+            self._show_build_options()
         # If any errors found, exit with status 1
         had_errors = bool(self.results.get("had_errors"))
         if had_errors:
             sys.exit(1)
 
 
-def main():
+def main() -> None:
     """Main function with command line argument parsing."""
     parser = argparse.ArgumentParser(description="Comprehensive dynamo package checker")
     parser.add_argument(
@@ -1563,7 +1509,7 @@ def main():
             sys.exit(1)
         # If examples are also requested and imports succeeded, show them
         if args.examples:
-            checker.show_usage_examples()
+            checker._show_build_options()
         # If build options are also requested, show them
         if args.build_options:
             if checker.workspace_dir:
@@ -1588,7 +1534,7 @@ def main():
             print("❌ Error: No dynamo workspace found for build options")
     elif args.examples:
         # Only show examples, no system info or environment header
-        checker.show_usage_examples()
+        checker._show_build_options()
     else:
         checker.run_all()
 
