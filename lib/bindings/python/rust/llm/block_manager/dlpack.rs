@@ -19,7 +19,7 @@
 
 use super::*;
 use dlpark::ffi::{DataType, Device, ManagerCtx, ShapeAndStrides, ToTensor};
-use pyo3::{ffi::c_str, types::PyTuple, PyObject, PyResult, Python, IntoPyObjectExt};
+use pyo3::{ffi::c_str, types::PyTuple, IntoPyObjectExt, PyObject, PyResult, Python};
 use std::sync::{Arc, Mutex};
 
 struct DlPackTensor {
