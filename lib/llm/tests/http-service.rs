@@ -50,8 +50,9 @@ use std::{io::Cursor, sync::Arc};
 use tokio::time::timeout;
 use tokio_util::codec::FramedRead;
 
-mod test_common_ext;
-use test_common_ext::get_random_port;
+#[path = "common/ports.rs"]
+mod ports;
+use ports::get_random_port;
 
 struct CounterEngine {}
 
@@ -576,7 +577,6 @@ async fn wait_for_service_ready(port: u16) {
     }
 }
 
-// Update the fixtures to not use hardcoded defaults:
 async fn service_with_engines() -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>, u16) {
     let port = get_random_port().await;
     let service = HttpService::builder()

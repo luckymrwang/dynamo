@@ -7,8 +7,9 @@ use dynamo_runtime::CancellationToken;
 use serial_test::serial;
 use std::{env, time::Duration};
 
-mod test_common_ext;
-use test_common_ext::get_random_port;
+#[path = "common/ports.rs"]
+mod ports;
+use ports::get_random_port;
 
 #[tokio::test]
 #[serial]
