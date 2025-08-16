@@ -11,14 +11,6 @@ use dynamo_llm::protocols::{
     },
 };
 
-/// Get a random available port for testing
-pub async fn get_random_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener); // Release immediately
-    port
-}
-
 #[test]
 fn test_chat_completions_ignore_eos_from_common() {
     // Test that ignore_eos can be specified at root level
