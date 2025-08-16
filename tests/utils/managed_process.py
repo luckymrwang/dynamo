@@ -115,15 +115,14 @@ class ManagedProcess:
     def __exit__(self, exc_type, exc_val, exc_tb):
         # First, terminate the process to stop output generation
         if self._proc:
-            terminate_process_tree(self._proc.pid, self._logger)
-            self._proc.wait()
+            try:
+                terminate_process_tree(self._proc.pid, self._logger)
+                self._proc.wait()
+            except Exception as e:
+                self._logger.warning(f"Error terminating process: {e}")
 
         # Wait for output processing thread to finish
-        if (
-            hasattr(self, "_output_thread")
-            and self._output_thread
-            and self._output_thread.is_alive()
-        ):
+        if self._output_thread and self._output_thread.is_alive():
             self._logger.info("Waiting for output thread to finish...")
             self._output_thread.join(timeout=5)  # Give it 5 seconds to finish
 
@@ -137,21 +136,21 @@ class ManagedProcess:
         if self.data_dir:
             self._remove_directory(self.data_dir)
 
+        # Clean up straggler processes
         for ps_process in psutil.process_iter(["name", "cmdline"]):
             try:
                 if ps_process.name() in self.stragglers:
                     self._logger.info(
                         "Terminating Straggler %s %s", ps_process.name(), ps_process.pid
                     )
-
                     terminate_process_tree(ps_process.pid, self._logger)
                 for cmdline in self.straggler_commands:
                     if cmdline in " ".join(ps_process.cmdline()):
                         self._logger.info(
-                            "Terminating Straggler Cmdline %s %s %s",
+                            "Terminating Existing CmdLine %s %s %s",
                             ps_process.name(),
                             ps_process.pid,
-                            cmdline,
+                            ps_process.cmdline(),
                         )
                         terminate_process_tree(ps_process.pid, self._logger)
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
@@ -182,19 +181,29 @@ class ManagedProcess:
 
         # Single output processing function for both cases
         def process_output():
+            log_file = None
             try:
-                # Clear log file first
-                with open(self._log_path, "w", encoding="utf-8") as f:
-                    pass
+                # Clear log file first by removing it
+                if self._log_path:
+                    try:
+                        os.remove(self._log_path)
+                    except FileNotFoundError:
+                        pass  # File doesn't exist yet, which is fine
+
+                # Open log file once for the entire session
+                if self._log_path:
+                    log_file = open(self._log_path, "a", encoding="utf-8")
 
                 # Process output line by line with non-blocking reads
                 while True:
                     # Check if process is still alive
-                    if self._proc.poll() is not None:
+                    if not self._proc or self._proc.poll() is not None:
                         break
 
                     # Use select to check if there's data available (non-blocking)
                     try:
+                        if not self._proc.stdout:
+                            break
                         ready, _, _ = select.select(
                             [self._proc.stdout], [], [], 0.1
                         )  # 100ms timeout
@@ -208,28 +217,35 @@ class ManagedProcess:
                             if not line:  # EOF reached
                                 break
 
-                            formatted_line = (
-                                f"[{self._command_name.upper()}] {line.rstrip()}"
-                            )
+                            if self._command_name:
+                                formatted_line = (
+                                    f"[{self._command_name.upper()}] {line.rstrip()}"
+                                )
+                            else:
+                                formatted_line = f"[UNKNOWN] {line.rstrip()}"
+
                             if self.display_output:
                                 print(formatted_line, flush=True)
                             # Write to log file
-                            with open(self._log_path, "a", encoding="utf-8") as f:
-                                f.write(formatted_line + "\n")
-                                f.flush()
+                            if log_file:
+                                log_file.write(formatted_line + "\n")
+                                log_file.flush()
                         except (OSError, ValueError):
                             # File descriptor is closed or invalid
                             break
                         except Exception as e:
                             self._logger.warning(f"Line processing error: {e}")
                             break
-                    else:
-                        # No data available, check if process is done
-                        if self._proc.poll() is not None:
-                            break
 
             except Exception as e:
                 self._logger.warning(f"Output processing error: {e}")
+            finally:
+                # Ensure log file is properly closed
+                if log_file:
+                    try:
+                        log_file.close()
+                    except Exception as e:
+                        self._logger.warning(f"Error closing log file: {e}")
 
         self._output_thread = threading.Thread(target=process_output, daemon=True)
         self._output_thread.start()
