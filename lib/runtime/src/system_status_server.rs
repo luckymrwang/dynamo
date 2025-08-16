@@ -77,10 +77,9 @@ pub struct SystemStatusState {
 impl SystemStatusState {
     /// Create new system status server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
-        // Note: This metric is created at the DRT level (no namespace), so we manually add "dynamo_" prefix
-        // to maintain consistency with the project's metric naming convention
+        // Note: This metric is created at the DRT level (no namespace), so it will be prefixed with "dynamo_component_"
         let uptime_gauge = drt.as_ref().create_gauge(
-            "dynamo_uptime_seconds",
+            "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[],
         )?;
@@ -363,9 +362,9 @@ mod tests {
             .join("\n");
 
         let expected = "\
-# HELP dynamo_component_dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_component_dynamo_uptime_seconds gauge
-dynamo_component_dynamo_uptime_seconds 42";
+# HELP dynamo_component_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE dynamo_component_uptime_seconds gauge
+dynamo_component_uptime_seconds 42";
         assert_eq!(filtered_response, expected);
     }
 
