@@ -540,7 +540,6 @@ impl Endpoint {
     /// Add constant labels to this Endpoint (for metrics). Returns a new Endpoint with labels.
     /// labels: list of (key, value) tuples.
     fn add_labels(&self, labels: Vec<(String, String)>) -> PyResult<Endpoint> {
-        use rs::metrics::MetricsRegistry as _;
         let pairs: Vec<(&str, &str)> = labels
             .iter()
             .map(|(k, v)| (k.as_str(), v.as_str()))
