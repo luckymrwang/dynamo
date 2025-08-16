@@ -536,7 +536,7 @@ impl Endpoint {
             .map(|l| l.id())
             .unwrap_or(0)
     }
-    
+
     /// Add constant labels to this Endpoint (for metrics). Returns a new Endpoint with labels.
     /// labels: list of (key, value) tuples.
     fn add_labels(&self, labels: Vec<(String, String)>) -> PyResult<Endpoint> {
