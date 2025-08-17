@@ -1284,6 +1284,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												},
 												Env: []corev1.EnvVar{
 													{
+														Name:  "DYNAMO_HTTP_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+													},
+													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
 													},
@@ -2020,6 +2024,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "DYNAMO_HTTP_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -2769,6 +2777,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													},
 												},
 												Env: []corev1.EnvVar{
+													{
+														Name:  "DYNAMO_HTTP_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+													},
 													{
 														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
 														Value: "1",
@@ -4205,6 +4217,119 @@ func XTestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
 							t.Errorf("Clique %s expected StartsAfter[%d] = %s, got %v", cliqueName, i, expectedDep, clique.Spec.StartsAfter)
 						}
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateBasePodSpec_Frontend(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+	controllerConfig := controller_common.Config{}
+	dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-deployment",
+			Namespace: "default",
+		},
+	}
+
+	tests := []struct {
+		name             string
+		component        *v1alpha1.DynamoComponentDeploymentOverridesSpec
+		backendFramework BackendFramework
+		wantWorkingDir   string
+		wantEnvVars      map[string]string
+		wantErr          bool
+	}{
+		{
+			name: "vllm frontend",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+				},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			wantWorkingDir:   "/workspace/components/backends/vllm",
+			wantEnvVars: map[string]string{
+				"DYNAMO_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+			},
+		},
+		{
+			name: "sglang frontend",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+				},
+			},
+			backendFramework: BackendFrameworkSGLang,
+			wantWorkingDir:   "/workspace/components/backends/sglang",
+			wantEnvVars: map[string]string{
+				"DYNAMO_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+			},
+		},
+		{
+			name: "trtllm frontend",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					ComponentType: commonconsts.ComponentTypeFrontend,
+				},
+			},
+			backendFramework: BackendFrameworkTRTLLM,
+			wantWorkingDir:   "/workspace/components/backends/trtllm",
+			wantEnvVars: map[string]string{
+				"DYNAMO_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			podSpec, err := GenerateBasePodSpec(
+				tt.component,
+				tt.backendFramework,
+				secretsRetriever,
+				dynamoDeployment.Name,
+				dynamoDeployment.Namespace,
+				RoleMain,
+				1,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+				"test-service",
+			)
+
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GenerateBasePodSpec() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
+				return
+			}
+
+			// Check working directory
+			if podSpec.Containers[0].WorkingDir != tt.wantWorkingDir {
+				t.Errorf("GenerateBasePodSpec() workingDir = %v, want %v",
+					podSpec.Containers[0].WorkingDir, tt.wantWorkingDir)
+			}
+
+			// Check command and args
+			if !reflect.DeepEqual(podSpec.Containers[0].Command, []string{"python3"}) {
+				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
+					podSpec.Containers[0].Command, []string{"python3"})
+			}
+			if !reflect.DeepEqual(podSpec.Containers[0].Args, []string{"-m", "dynamo.frontend"}) {
+				t.Errorf("GenerateBasePodSpec() args = %v, want %v",
+					podSpec.Containers[0].Args, []string{"-m", "dynamo.frontend"})
+			}
+
+			// Check environment variables
+			envVars := make(map[string]string)
+			for _, env := range podSpec.Containers[0].Env {
+				envVars[env.Name] = env.Value
+			}
+			for k, v := range tt.wantEnvVars {
+				if envVars[k] != v {
+					t.Errorf("GenerateBasePodSpec() env var %s = %v, want %v",
+						k, envVars[k], v)
 				}
 			}
 		})

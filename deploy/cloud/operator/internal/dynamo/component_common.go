@@ -43,6 +43,7 @@ type ComponentContext struct {
 	DynamoNamespace                string
 	ParentGraphDeploymentName      string
 	ParentGraphDeploymentNamespace string
+	BackendFramework               BackendFramework
 }
 
 func (b *BaseComponentDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {

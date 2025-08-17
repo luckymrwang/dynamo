@@ -23,9 +23,31 @@ func NewFrontendDefaults() *FrontendDefaults {
 	return &FrontendDefaults{&BaseComponentDefaults{}}
 }
 
+func (f *FrontendDefaults) getWorkingDir(context ComponentContext) string {
+	switch context.BackendFramework {
+	case BackendFrameworkVLLM:
+		return "/workspace/components/backends/vllm"
+	case BackendFrameworkSGLang:
+		return "/workspace/components/backends/sglang"
+	case BackendFrameworkTRTLLM:
+		return "/workspace/components/backends/trtllm"
+	default:
+		return "" // signal no working dir default available for this framework
+	}
+}
+
 func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Container, error) {
 	// Frontend doesn't need backend-specific config
 	container := f.getCommonContainer(context)
+
+	// Set working directory based on backend framework if available
+	if workingDir := f.getWorkingDir(context); workingDir != "" {
+		container.WorkingDir = workingDir
+	}
+
+	// Set default command and args
+	container.Command = []string{"python3"}
+	container.Args = []string{"-m", "dynamo.frontend"}
 
 	// Add HTTP port
 	container.Ports = []corev1.ContainerPort{
@@ -81,6 +103,10 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	container.Env = append(container.Env, []corev1.EnvVar{
 		{
 			Name:  commonconsts.EnvDynamoServicePort,
+			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+		},
+		{
+			Name:  "DYNAMO_HTTP_PORT", // TODO: need to reconcile DYNAMO_PORT and DYNAMO_HTTP_PORT
 			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 		},
 	}...)
