@@ -70,7 +70,12 @@ impl WorkerMetricsPublisher {
                 if labels.is_empty() {
                     None
                 } else {
-                    Some(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
+                    Some(
+                        labels
+                            .iter()
+                            .map(|(k, v)| (k.as_str(), v.as_str()))
+                            .collect(),
+                    )
                 }
             } else {
                 None

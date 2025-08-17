@@ -35,7 +35,6 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let client = component
         .endpoint("generate")
-        .add_labels(&[("model", "service_metrics_model")])?
         .client()
         .await?;
 

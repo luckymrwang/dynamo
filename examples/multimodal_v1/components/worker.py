@@ -140,7 +140,9 @@ class VllmBaseWorker:
 
         # Create vLLM engine with metrics logger and KV event publisher attached
         self.stats_logger = StatLoggerFactory(
-            component, self.engine_args.data_parallel_rank or 0
+            component,
+            self.engine_args.data_parallel_rank or 0,
+            [("model", self.engine_args.model)],
         )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,

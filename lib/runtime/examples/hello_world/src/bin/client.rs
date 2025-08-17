@@ -32,7 +32,6 @@ async fn app(runtime: Runtime) -> Result<()> {
         .namespace(DEFAULT_NAMESPACE)?
         .component("backend")?
         .endpoint("generate")
-        .add_labels(&[("model", "hello_world_model")])?
         .client()
         .await?;
     client.wait_for_instances().await?;

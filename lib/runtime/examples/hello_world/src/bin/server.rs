@@ -73,7 +73,6 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
         .create()
         .await?
         .endpoint("generate")
-        .add_labels(&[("model", "hello_world_model")])?
         .endpoint_builder()
         .handler(ingress)
         .start()
