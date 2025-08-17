@@ -37,6 +37,9 @@ jobs:
           lychee --version
 
       - name: Check documentation links with lychee
+        env:
+          # Set GITHUB_TOKEN to avoid github rate limits on URL checks
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Run lychee against all files in repo
