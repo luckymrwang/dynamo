@@ -183,7 +183,7 @@ Run the backend/worker like this:
 python -m dynamo.sglang.worker --help
 ```
 
-You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/backend/server_arguments.html . See there to use multiple GPUs.
+You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/advanced_features/server_arguments.html . See there to use multiple GPUs.
 
 ## TensorRT-LLM
 

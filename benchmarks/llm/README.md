@@ -40,7 +40,7 @@ This guide provides detailed steps on benchmarking Large Language Models (LLMs) 
  3. Start NATS and ETCD
 
     ```bash
-    docker compose -f deploy/metrics/docker-compose.yml up -d
+    docker compose -f deploy/docker-compose.yml up -d
     ```
 
 > [!NOTE]
@@ -312,11 +312,6 @@ With the Pareto Frontiers of the baseline and the disaggregated results plotted 
 greatest increase in throughput (along the y-axis) between the baseline and the disaggregated result Pareto Frontier,
 over different latencies (along the x-axis).
 
-For example, at 45 tokens/s/user, the increase in tokens/s/gpu is `145 - 80 = 65`, from the orange baseline to the
-blue disaggregated line, so the improvement is around 1.44x speed up:
-![Example Pareto Plot](./example_plots/single_node_pareto_plot.png)
-Note: The above example was collected over a single benchmarking run, the actual number may vary between runs, configurations and hardware.
-
 ## Supporting Additional Models
 
 The instructions above can be used for nearly any model desired.
@@ -324,15 +319,7 @@ More complex setup instructions might be required for certain models.
 The above instruction regarding ETCD, NATS, nginx, dynamo-serve, and GenAI-Perf still apply and can be reused.
 The specifics of deploying with different hardware, in a unique environment, or using another model framework can be adapted using the links below.
 
-Regardless of the deployment mechanism, the GenAI-Perf tool will report the same metrics and measurements so long as an accessible endpoint is available for it to interact with. Use the provided [perf.sh](../../../benchmarks/llm/perf.sh) script to automate the measurement of model throughput and latency against multiple request concurrences.
-
-### Deployment Examples
-
-- [Dynamo Multinode Deployments](../../../docs/examples/multinode.md)
-- [Dynamo TensorRT LLM Deployments](../../../docs/examples/trtllm.md)
-    - [Aggregated Deployment of Very Large Models](../../../docs/examples/multinode.md#aggregated-deployment)
-- [Dynamo vLLM Deployments](../../../docs/examples/llm_deployment.md)
-
+Regardless of the deployment mechanism, the GenAI-Perf tool will report the same metrics and measurements so long as an accessible endpoint is available for it to interact with. Use the provided [perf.sh](perf.sh) script to automate the measurement of model throughput and latency against multiple request concurrences.
 
 ## Monitor Benchmark Startup Status
 
@@ -388,7 +375,7 @@ when the script is invoked, it will:
 ## Metrics and Visualization
 
 For instructions on how to acquire per worker metrics and visualize them using Grafana,
-please see the provided [Visualization with Prometheus and Grafana](../../../deploy/metrics/README.md).
+please see the provided [Visualization with Prometheus and Grafana](../../docs/guides/metrics.md).
 
 ## Troubleshooting
 
