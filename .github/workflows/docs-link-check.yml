@@ -17,6 +17,7 @@ jobs:
         uses: actions/checkout@v4
 
       # Cache lychee results (e.g. to avoid hitting rate limits)
+      # https://lychee.cli.rs/github_action_recipes/caching/
       - name: Restore lychee cache
         uses: actions/cache@v4
         with:
