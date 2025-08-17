@@ -4258,7 +4258,8 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			name: "sglang frontend",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: commonconsts.ComponentTypeFrontend,
+					ComponentType:   commonconsts.ComponentTypeFrontend,
+					DynamoNamespace: ptr.To("sglang"),
 				},
 			},
 			backendFramework: BackendFrameworkSGLang,
@@ -4312,13 +4313,24 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 			}
 
 			// Check command and args
-			if !reflect.DeepEqual(podSpec.Containers[0].Command, []string{"python3"}) {
-				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
-					podSpec.Containers[0].Command, []string{"python3"})
+			var wantCommand []string
+			var wantArgs []string
+			if tt.backendFramework == BackendFrameworkSGLang {
+				wantCommand = []string{"sh", "-c"}
+				wantArgs = []string{
+					fmt.Sprintf("python3 -m dynamo.sglang.utils.clear_namespace --namespace %s && python3 -m dynamo.frontend", "sglang"),
+				}
+			} else {
+				wantCommand = []string{"python3"}
+				wantArgs = []string{"-m", "dynamo.frontend"}
 			}
-			if !reflect.DeepEqual(podSpec.Containers[0].Args, []string{"-m", "dynamo.frontend"}) {
+			if !reflect.DeepEqual(podSpec.Containers[0].Command, wantCommand) {
+				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
+					podSpec.Containers[0].Command, wantCommand)
+			}
+			if !reflect.DeepEqual(podSpec.Containers[0].Args, wantArgs) {
 				t.Errorf("GenerateBasePodSpec() args = %v, want %v",
-					podSpec.Containers[0].Args, []string{"-m", "dynamo.frontend"})
+					podSpec.Containers[0].Args, wantArgs)
 			}
 
 			// Check environment variables

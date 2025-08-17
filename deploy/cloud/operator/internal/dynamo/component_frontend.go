@@ -46,8 +46,16 @@ func (f *FrontendDefaults) GetBaseContainer(context ComponentContext) (corev1.Co
 	}
 
 	// Set default command and args
-	container.Command = []string{"python3"}
-	container.Args = []string{"-m", "dynamo.frontend"}
+	if context.BackendFramework == BackendFrameworkSGLang {
+		// For SGLang, we need to clear the namespace first
+		container.Command = []string{"sh", "-c"}
+		container.Args = []string{
+			fmt.Sprintf("python3 -m dynamo.sglang.utils.clear_namespace --namespace %s && python3 -m dynamo.frontend", context.DynamoNamespace),
+		}
+	} else {
+		container.Command = []string{"python3"}
+		container.Args = []string{"-m", "dynamo.frontend"}
+	}
 
 	// Add HTTP port
 	container.Ports = []corev1.ContainerPort{
