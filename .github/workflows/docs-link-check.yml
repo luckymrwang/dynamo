@@ -32,8 +32,6 @@ jobs:
           lychee --version
 
       - name: Check documentation links with lychee
-        #env:
-        #  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           # Run lychee against all files in repo
