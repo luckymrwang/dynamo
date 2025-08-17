@@ -21,7 +21,7 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.local/bin"
           cd "$RUNNER_TEMP"
-          # Lychee v0.19.1 doesn't support regex in --exclude-path, so use nightly
+          # TODO: Lychee v0.19.1 doesn't support regex in --exclude-path, so use nightly
           # release until there is a released version containing regex support.
           curl -sSL -o lychee.tar.gz \
             https://github.com/lycheeverse/lychee/releases/download/nightly/lychee-x86_64-unknown-linux-gnu.tar.gz
