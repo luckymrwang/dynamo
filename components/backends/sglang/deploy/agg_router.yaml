@@ -21,7 +21,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
-      env:
+      envs:
         - name: DYNAMO_ROUTER_MODE
           value: kv
     SGLangDecodeWorker:
