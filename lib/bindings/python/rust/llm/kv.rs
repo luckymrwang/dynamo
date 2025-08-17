@@ -55,18 +55,29 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[pyo3(signature = (component, model = None))]
+    #[pyo3(signature = (component, labels = None))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
-        model: Option<String>,
+        labels: Option<Vec<(String, String)>>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            // Convert Python labels to Option<&[(&str, &str)]> expected by Rust API
+            let labels_ref: Option<Vec<(&str, &str)>> = if let Some(labels) = labels.as_ref() {
+                if labels.is_empty() {
+                    None
+                } else {
+                    Some(labels.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
+                }
+            } else {
+                None
+            };
+
             rs_publisher
-                .create_endpoint(rs_component, model)
+                .create_endpoint(rs_component, labels_ref.as_deref())
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
