@@ -115,7 +115,7 @@ flowchart LR
 
 #### Code Examples
 
-See [prefill_worker](../components/prefill_worker.py#L199) or [decode_worker](../components/decode_worker.py#L239),
+See [prefill_worker](../components/worker.py) or [decode_worker](../components/worker.py),
 for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](#writableoperation),
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
