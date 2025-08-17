@@ -159,4 +159,4 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/quickstart.md#troubleshooting).
+For additional support, refer to the [deployment guide](../../../../docs/guides/dynamo_deploy/quickstart.md).

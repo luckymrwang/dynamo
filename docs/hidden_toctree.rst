@@ -52,7 +52,7 @@
    components/backends/trtllm/deploy/README.md
    components/backends/trtllm/llama4_plus_eagle.md
    components/backends/trtllm/multinode-examples.md
-   components/backends/trtllm/kv-cache-tranfer.md
+   components/backends/trtllm/kv-cache-transfer.md
    components/backends/vllm/deploy/README.md
    components/backends/vllm/multi-node.md
 

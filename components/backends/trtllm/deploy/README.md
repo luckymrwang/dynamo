@@ -241,7 +241,7 @@ TensorRT-LLM supports two methods for KV cache transfer in disaggregated serving
 - **UCX** (default): Standard method for KV cache transfer
 - **NIXL** (experimental): Alternative transfer method
 
-For detailed configuration instructions, see the [KV cache transfer guide](../kv-cache-tranfer.md).
+For detailed configuration instructions, see the [KV cache transfer guide](../kv-cache-transfer.md).
 
 ## Request Migration
 
