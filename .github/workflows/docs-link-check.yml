@@ -16,6 +16,14 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
+      # Cache lychee results (e.g. to avoid hitting rate limits)
+      - name: Restore lychee cache
+        uses: actions/cache@v4
+        with:
+          path: .lycheecache
+          key: cache-lychee-${{ github.sha }}
+          restore-keys: cache-lychee-
+
       # https://github.com/lycheeverse/lychee/issues/1487
       - name: Install CA Certificates for lychee
         run: |
@@ -44,6 +52,7 @@ jobs:
           set -euo pipefail
           # Run lychee against all files in repo
           lychee \
+            --cache \
             --no-progress \
             --exclude-path "ATTRIBUTIONS.*" \
             --accept "200..=299, 403, 429" \
