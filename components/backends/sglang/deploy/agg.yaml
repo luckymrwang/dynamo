@@ -15,9 +15,6 @@ spec:
         requests:
           cpu: "10"
           memory: "10Gi"
-        limits:
-          cpu: "32"
-          memory: "40Gi"
       extraPodSpec:
         mainContainer:
           image: my-registry/sglang-runtime:my-tag
@@ -34,10 +31,7 @@ spec:
         requests:
           cpu: "10"
           memory: "20Gi"
-          gpu: "1"
         limits:
-          cpu: "32"
-          memory: "80Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:

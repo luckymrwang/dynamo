@@ -39,8 +39,6 @@ spec:
           cpu: "10"
           memory: "40Gi"
         limits:
-          cpu: "10"
-          memory: "40Gi"
           gpu: "4"
       extraPodSpec:
         mainContainer:
@@ -71,8 +69,6 @@ spec:
           cpu: "10"
           memory: "40Gi"
         limits:
-          cpu: "10"
-          memory: "40Gi"
           gpu: "4"
       extraPodSpec:
         mainContainer:

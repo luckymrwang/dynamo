@@ -22,10 +22,7 @@ spec:
       replicas: 1
       resources:
         requests:
-          cpu: "32"
-          memory: "10Gi"
-        limits:
-          cpu: "32"
+          cpu: "5"
           memory: "10Gi"
       extraPodSpec:
         mainContainer:
@@ -62,9 +59,6 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
           cpu: "2"
           memory: "2Gi"
       pvc:
@@ -119,9 +113,6 @@ spec:
         requests:
           cpu: "2"
           memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:hzhou-0814-02
@@ -140,10 +131,7 @@ spec:
         requests:
           cpu: "8"
           memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -169,10 +157,7 @@ spec:
         requests:
           cpu: "8"
           memory: "16Gi"
-          gpu: "1"
         limits:
-          cpu: "8"
-          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
