@@ -33,10 +33,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let namespace = distributed.namespace(DEFAULT_NAMESPACE)?;
     let component = namespace.component("backend")?;
 
-    let client = component
-        .endpoint("generate")
-        .client()
-        .await?;
+    let client = component.endpoint("generate").client().await?;
 
     client.wait_for_instances().await?;
     let router =
