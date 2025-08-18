@@ -269,10 +269,14 @@ impl Component {
 
     /// Add Prometheus metrics for this component's service stats.
     ///
-    /// Starts a background task that scrapes stats every 5 seconds and updates metrics.
-    /// The callback will simply use the latest scraped data.
+    /// Starts a background task that scrapes stats every ~4.7s and updates metrics.
+    /// The thinking was that it should be a little bit shorter than the Prometheus polling interval.
+    /// Currently Prometheus polls every 6 seconds, and I wanted every poll to be fresh, so this is set
+    /// as an arbitrary 4.7 seconds plus 0.3 seconds if it times out. It's a bit of a hand-wavey decision.
     pub fn start_scraping_metrics(&self) -> Result<()> {
-        const MAX_DELAY: std::time::Duration = std::time::Duration::from_millis(4700);
+        const NATS_TIMEOUT_AND_INITIAL_DELAY_MS: std::time::Duration =
+            std::time::Duration::from_millis(300);
+        const MAX_DELAY_MS: std::time::Duration = std::time::Duration::from_millis(4700);
 
         let component_metrics = ComponentNatsPrometheusMetrics::new(self)?;
 
@@ -290,19 +294,13 @@ impl Component {
 
         // Use std::thread for the background task to avoid runtime context issues
         std::thread::spawn(move || {
-            // Create a new runtime for this background thread
-            let rt = match tokio::runtime::Runtime::new() {
-                Ok(rt) => rt,
-                Err(err) => {
-                    tracing::error!("Failed to create Tokio runtime for metrics: {}", err);
-                    return;
-                }
-            };
+            // Use the existing secondary runtime from drt for background metrics scraping
+            let rt = c.drt().runtime().secondary();
 
             // Run the background scraping loop
             rt.block_on(async {
-                let timeout = std::time::Duration::from_millis(300);
-                let mut delay = std::time::Duration::from_millis(300);
+                let timeout = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
+                let mut delay = NATS_TIMEOUT_AND_INITIAL_DELAY_MS;
 
                 loop {
                     match c.scrape_stats(timeout).await {
@@ -317,7 +315,7 @@ impl Component {
                             );
                             m.reset_to_zeros();
                             // Double delay on failure, capped at MAX_DELAY
-                            delay = std::cmp::min(delay * 2, MAX_DELAY);
+                            delay = std::cmp::min(delay * 2, MAX_DELAY_MS);
                         }
                     }
                     tokio::time::sleep(delay).await;
