@@ -14,13 +14,14 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Login to dockerhub
+      run: |
+        echo "${{ secrets.DOCKERHUB_TOKEN }}" | docker login -u "${{ secrets.DOCKERHUB_USERNAME }}" --password-stdin
+    
     - name: Build the Docker image
       run: |
-      echo "==Debug Check files =="
-      ls -la ./container/
-
-      echo "=== Set permissions ==="
-      chmod +x ./container/build.sh
+        chmod +x ./container/build.sh
       
-      ./container/build.sh --framework vllm
+        ./container/build.sh --tag my-image:latest
+      
       
