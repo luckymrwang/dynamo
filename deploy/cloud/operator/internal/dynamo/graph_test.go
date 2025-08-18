@@ -4237,46 +4237,17 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 		name             string
 		component        *v1alpha1.DynamoComponentDeploymentOverridesSpec
 		backendFramework BackendFramework
-		wantWorkingDir   string
 		wantEnvVars      map[string]string
 		wantErr          bool
 	}{
 		{
-			name: "vllm frontend",
+			name: "frontend with default command",
 			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 					ComponentType: commonconsts.ComponentTypeFrontend,
 				},
 			},
 			backendFramework: BackendFrameworkVLLM,
-			wantWorkingDir:   "/workspace/components/backends/vllm",
-			wantEnvVars: map[string]string{
-				"DYNAMO_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-			},
-		},
-		{
-			name: "sglang frontend",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType:   commonconsts.ComponentTypeFrontend,
-					DynamoNamespace: ptr.To("sglang"),
-				},
-			},
-			backendFramework: BackendFrameworkSGLang,
-			wantWorkingDir:   "/workspace/components/backends/sglang",
-			wantEnvVars: map[string]string{
-				"DYNAMO_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-			},
-		},
-		{
-			name: "trtllm frontend",
-			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
-				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
-					ComponentType: commonconsts.ComponentTypeFrontend,
-				},
-			},
-			backendFramework: BackendFrameworkTRTLLM,
-			wantWorkingDir:   "/workspace/components/backends/trtllm",
 			wantEnvVars: map[string]string{
 				"DYNAMO_HTTP_PORT": fmt.Sprintf("%d", commonconsts.DynamoServicePort),
 			},
@@ -4306,24 +4277,9 @@ func TestGenerateBasePodSpec_Frontend(t *testing.T) {
 				return
 			}
 
-			// Check working directory
-			if podSpec.Containers[0].WorkingDir != tt.wantWorkingDir {
-				t.Errorf("GenerateBasePodSpec() workingDir = %v, want %v",
-					podSpec.Containers[0].WorkingDir, tt.wantWorkingDir)
-			}
-
 			// Check command and args
-			var wantCommand []string
-			var wantArgs []string
-			if tt.backendFramework == BackendFrameworkSGLang {
-				wantCommand = []string{"sh", "-c"}
-				wantArgs = []string{
-					fmt.Sprintf("python3 -m dynamo.sglang.utils.clear_namespace --namespace %s && python3 -m dynamo.frontend", "sglang"),
-				}
-			} else {
-				wantCommand = []string{"python3"}
-				wantArgs = []string{"-m", "dynamo.frontend"}
-			}
+			wantCommand := []string{"python3"}
+			wantArgs := []string{"-m", "dynamo.frontend"}
 			if !reflect.DeepEqual(podSpec.Containers[0].Command, wantCommand) {
 				t.Errorf("GenerateBasePodSpec() command = %v, want %v",
 					podSpec.Containers[0].Command, wantCommand)
