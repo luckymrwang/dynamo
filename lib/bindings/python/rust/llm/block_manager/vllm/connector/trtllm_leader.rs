@@ -25,7 +25,8 @@ pub trait Leader: Send + Sync + std::fmt::Debug {
     fn update_state_after_alloc(
         &mut self,
         request_id: String,
-        block_ids: Vec<BlockId>
+        block_ids: Vec<BlockId>,
+        context_current_position: usize,
     ) -> anyhow::Result<()>;
 
     fn build_connector_metadata(
@@ -151,8 +152,11 @@ impl Leader for KvConnectorLeader {
             "request_num_tokens: {request_num_tokens}; num_computed_tokens: {num_computed_tokens}"
         );
 
-        // the number of device matched tokens should be less than or equal to the number of tokens in the request
-        debug_assert!(num_computed_tokens % self.block_size == 0);
+        // TRTLLM could match partial blocks if enable_partial_reuse = True,
+        // immediately return 0 to simplify things.
+        if num_computed_tokens % self.block_size != 0 {
+            return Ok((0, false));
+        }
 
         let shared_slot = self.slot_manager().get_slot(&request_id)?;
         let mut slot = shared_slot
@@ -197,6 +201,7 @@ impl Leader for KvConnectorLeader {
         &mut self,
         request_id: String,
         block_ids: Vec<BlockId>,
+        context_current_position: usize,
     ) -> anyhow::Result<()> {
         tracing::debug!(
             request_id,
@@ -216,7 +221,7 @@ impl Leader for KvConnectorLeader {
 
         if let Some(&num_external_tokens) = self.inflight_request_to_num_external_tokens.get(&request_id) {
             if num_external_tokens > 0 {
-                let num_computed_tokens = block_ids.len() * self.block_size - num_external_tokens;
+                let num_computed_tokens = (context_current_position + 1) - num_external_tokens;
                 slot.record_cached_device_tokens(num_computed_tokens);
                 slot.advance_computed_position(num_computed_tokens)?;
 
@@ -302,12 +307,7 @@ impl Leader for KvConnectorLeader {
                 slot.state()
             );
 
-            let scheduled_tokens = *scheduler_output
-                .num_scheduled_tokens
-                .get(request_id)
-                .unwrap_or(&0);
-
-            slot.apply_scheduler_output(&[], &[], new_req.num_computed_tokens, scheduled_tokens)?;
+            slot.apply_scheduler_output_without_scheduled_tokens(&new_req.prompt_token_ids, &new_req.block_ids, new_req.num_computed_tokens)?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
                 tracing::debug!(
@@ -333,16 +333,10 @@ impl Leader for KvConnectorLeader {
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-            let scheduled_tokens = *scheduler_output
-                .num_scheduled_tokens
-                .get(request_id)
-                .unwrap_or(&0);
-
-            slot.apply_scheduler_output(
+            slot.apply_scheduler_output_without_scheduled_tokens(
                 &cached_req.new_token_ids,
                 &cached_req.new_block_ids,
                 cached_req.num_computed_tokens,
-                scheduled_tokens,
             )?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
@@ -451,10 +445,11 @@ impl PyTrtllmKvConnectorLeader {
     fn update_state_after_alloc(
         &mut self,
         request_id: String,
-        block_ids: Vec<BlockId>
+        block_ids: Vec<BlockId>,
+        context_current_position: usize,
     ) -> PyResult<()> {
         self.connector_leader
-            .update_state_after_alloc(request_id, block_ids)
+            .update_state_after_alloc(request_id, block_ids, context_current_position)
             .map_err(to_pyerr)
     }
 
