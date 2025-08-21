@@ -120,13 +120,19 @@ jobs:
     - name: Clone source code
       working-directory: ./
       run: |
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH dynamo
+        git clone $REPO_URL dynamo
+        cd dynamo
+        git checkout v0.4.0
     
     - name: Login to DockerHub
       uses: docker/login-action@v2
       with:
         username: ${{ secrets.DOCKERHUB_USERNAME }}
         password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT  
     
     - name: Build the Docker image
       run: |
@@ -138,5 +144,7 @@ jobs:
         docker tag dynamo:latest-vllm luckymrwang/dynamo:latest-vllm
     
         docker push luckymrwang/dynamo:latest-vllm
-      
-      
+    
+    - name: Check space usage
+      if: (!cancelled())
+      run: df -hT  
